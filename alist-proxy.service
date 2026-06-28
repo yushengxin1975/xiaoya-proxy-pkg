@@ -1,0 +1,22 @@
+[Unit]
+Description=Alist Reverse Proxy + Local Indexer
+Documentation=https://github.com/yushengxin1975/alist-proxy-pkg
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 从配置文件加载 ALIST_URL/USER/PASS 等环境变量
+EnvironmentFile=%h/.config/alist-proxy/config
+ExecStart=/usr/bin/python3 %h/.local/bin/alist_proxy.py
+# 可选:命令行覆盖端口
+# ExecStart=/usr/bin/python3 %h/.local/bin/alist_proxy.py 8080
+
+Restart=on-failure
+RestartSec=5
+# 日志直接进 journald
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

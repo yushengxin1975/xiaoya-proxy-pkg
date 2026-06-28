@@ -1,0 +1,9 @@
+# 临时 / 构建产物
+*.tar.gz
+*.tar.gz.sha256
+*.tmp
+.DS_Store
+__pycache__/
+*.pyc
+.idea/
+.vscode/

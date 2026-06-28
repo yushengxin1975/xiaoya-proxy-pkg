@@ -1,0 +1,24 @@
+# Alist 反向代理 + 本地索引 配置文件
+# 复制本文件为 ~/.config/alist-proxy/config 并填入真实值
+# 格式:KEY=VALUE(每行一个,# 开头是注释,空行忽略)
+# systemd 通过 EnvironmentFile 加载此文件
+
+# ====== 必填:Alist 服务器信息 ======
+
+# Alist 服务地址,例如 http://192.168.1.10:5244 或 https://alist.example.com
+ALIST_URL=http://localhost:5244
+
+# Alist 登录用户名(必填)
+ALIST_USER=
+
+# Alist 登录密码(必填)
+ALIST_PASS=
+
+# ====== 可选:代理监听配置 ======
+
+# 监听地址,默认 localhost(用 localhost 而非 127.0.0.1,浏览器跨域判断更宽松)
+# 如需从其他设备访问改为 0.0.0.0
+LISTEN_HOST=localhost
+
+# 监听端口,默认 8080
+LISTEN_PORT=8080

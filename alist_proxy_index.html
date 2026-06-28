@@ -1,0 +1,1209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alist 目录浏览器</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                   "Microsoft YaHei", sans-serif;
+      background: #0f1419;
+      color: #e6e6e6;
+      min-height: 100vh;
+    }
+    a { color: #4fc3f7; text-decoration: none; }
+    a:hover { color: #81d4fa; text-decoration: underline; }
+
+    header {
+      background: #1a2129;
+      border-bottom: 1px solid #2a3540;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    header .logo { font-size: 18px; font-weight: 600; color: #4fc3f7; }
+    header .crumbs {
+      font-size: 14px;
+      color: #888;
+      flex: 1;
+      min-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    header .crumbs a { color: #aaa; }
+    header .crumbs a:hover { color: #4fc3f7; }
+    header .crumbs .sep { margin: 0 6px; color: #555; }
+    header .crumbs .current { color: #e6e6e6; }
+    header .actions { display: flex; gap: 8px; align-items: center; }
+    header .actions button, header .actions select {
+      padding: 6px 12px;
+      background: #2a3540;
+      border: 1px solid #3a4550;
+      border-radius: 4px;
+      color: #e6e6e6;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    header .actions button:hover, header .actions select:hover { background: #34445a; }
+    header .actions button.active { background: #4fc3f7; color: #0f1419; }
+
+    .toolbar {
+      padding: 10px 20px;
+      background: #1a2129;
+      border-bottom: 1px solid #2a3540;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .toolbar input[type=text] {
+      flex: 1;
+      min-width: 200px;
+      max-width: 500px;
+      padding: 8px 12px;
+      background: #0f1419;
+      border: 1px solid #2a3540;
+      border-radius: 4px;
+      color: #e6e6e6;
+      font-size: 14px;
+      outline: none;
+    }
+    .toolbar input:focus { border-color: #4fc3f7; }
+    .toolbar .count {
+      font-size: 13px;
+      color: #777;
+    }
+    .toolbar .loading {
+      font-size: 13px;
+      color: #ffa726;
+    }
+
+    main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+
+    .item-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 10px;
+    }
+    .item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      background: #1a2129;
+      border: 1px solid #2a3540;
+      border-radius: 6px;
+      transition: all 0.15s;
+      color: inherit;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .item:hover {
+      background: #243040;
+      border-color: #4fc3f7;
+      text-decoration: none;
+      transform: translateY(-1px);
+    }
+    .item .icon {
+      font-size: 20px;
+      width: 24px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .item .info { flex: 1; min-width: 0; }
+    .item .name {
+      font-size: 13px;
+      color: #e6e6e6;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .item .meta {
+      font-size: 11px;
+      color: #777;
+      margin-top: 2px;
+    }
+    .item.video { border-left: 3px solid #4fc3f7; cursor: pointer; }
+    .item.video .icon { color: #4fc3f7; }
+    .item.video:hover .name { color: #4fc3f7; }
+    .item.dir { border-left: 3px solid #ffa726; }
+    .item.dir .icon { color: #ffa726; }
+    .item.new {
+      border-right: 3px solid #4caf50;
+    }
+    .item.new .meta::before {
+      content: "🆕 ";
+    }
+
+    .empty {
+      text-align: center;
+      color: #666;
+      padding: 60px 20px;
+      font-size: 14px;
+    }
+
+    .player-section {
+      background: #1a2129;
+      border: 1px solid #2a3540;
+      border-radius: 8px;
+      overflow: hidden;
+      margin-bottom: 20px;
+    }
+    .player-section .title-bar {
+      padding: 12px 16px;
+      font-size: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .player-section .title-bar .name { color: #e6e6e6; word-break: break-all; }
+    .player-section .title-bar .actions { display: flex; gap: 8px; }
+    .player-section .title-bar .actions a {
+      padding: 4px 10px;
+      background: #2a3540;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #4fc3f7;
+    }
+    .player-section .title-bar .actions a:hover { background: #34445a; text-decoration: none; }
+
+    .back-link {
+      display: inline-block;
+      margin-bottom: 16px;
+      font-size: 13px;
+      color: #888;
+    }
+
+    footer {
+      text-align: center;
+      padding: 20px;
+      color: #555;
+      font-size: 12px;
+    }
+
+    .tooltip {
+      position: fixed;
+      background: #2a3540;
+      border: 1px solid #4fc3f7;
+      padding: 6px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #e6e6e6;
+      pointer-events: none;
+      z-index: 100;
+      white-space: nowrap;
+      display: none;
+    }
+
+    /* 全局搜索 */
+    header .global-search {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      background: #0f1419;
+      border: 1px solid #2a3540;
+      border-radius: 4px;
+      padding: 0 8px;
+      transition: border-color 0.15s;
+    }
+    header .global-search:focus-within { border-color: #4fc3f7; }
+    header .global-search input {
+      background: transparent;
+      border: 0;
+      outline: none;
+      color: #e6e6e6;
+      font-size: 13px;
+      padding: 6px 0;
+      width: 240px;
+    }
+    header .global-search input::placeholder { color: #666; }
+    header .global-search button {
+      background: transparent;
+      border: 0;
+      color: #888;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 0 2px;
+      line-height: 1;
+    }
+    header .global-search button:hover { color: #e6e6e6; }
+    header .global-search .kbd {
+      font-size: 10px;
+      color: #666;
+      padding: 2px 4px;
+      background: #1a2129;
+      border: 1px solid #2a3540;
+      border-radius: 3px;
+      margin-left: 4px;
+      white-space: nowrap;
+    }
+
+    /* 搜索结果视图 */
+    .search-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .search-header .back-btn {
+      padding: 6px 12px;
+      background: #2a3540;
+      border: 1px solid #3a4550;
+      border-radius: 4px;
+      color: #e6e6e6;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .search-header .back-btn:hover { background: #34445a; }
+    .search-header .scope-info {
+      font-size: 13px;
+      color: #888;
+    }
+    .search-header .scope-info strong { color: #4fc3f7; }
+    .search-header .scope-info .scope-path {
+      color: #aaa;
+      font-family: monospace;
+      font-size: 12px;
+    }
+
+    .search-result {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      background: #1a2129;
+      border: 1px solid #2a3540;
+      border-radius: 6px;
+      transition: all 0.15s;
+      cursor: pointer;
+      margin-bottom: 6px;
+    }
+    .search-result:hover {
+      background: #243040;
+      border-color: #4fc3f7;
+      transform: translateY(-1px);
+    }
+    .search-result .icon {
+      font-size: 18px;
+      width: 24px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+    .search-result .info { flex: 1; min-width: 0; }
+    .search-result .name {
+      font-size: 13px;
+      color: #e6e6e6;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .search-result .name mark {
+      background: #ffa726;
+      color: #0f1419;
+      padding: 0 2px;
+      border-radius: 2px;
+    }
+    .search-result .meta {
+      font-size: 11px;
+      color: #777;
+      margin-top: 3px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .search-result .meta .parent-path {
+      color: #4fc3f7;
+      font-family: monospace;
+      font-size: 11px;
+    }
+    .search-result .meta .sep { margin: 0 6px; color: #444; }
+    .search-result.video { border-left: 3px solid #4fc3f7; }
+    .search-result.video .icon { color: #4fc3f7; }
+    .search-result.dir { border-left: 3px solid #ffa726; }
+    .search-result.dir .icon { color: #ffa726; }
+
+    .search-result .size, .search-result .date {
+      color: #888;
+      font-size: 11px;
+      margin-left: 8px;
+      white-space: nowrap;
+    }
+    .search-result .right-meta {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+      font-size: 11px;
+    }
+
+    .search-pagination {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin-top: 20px;
+    }
+    .search-pagination button {
+      padding: 6px 12px;
+      background: #2a3540;
+      border: 1px solid #3a4550;
+      border-radius: 4px;
+      color: #e6e6e6;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .search-pagination button:hover:not(:disabled) { background: #34445a; }
+    .search-pagination button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .search-pagination .page-info {
+      padding: 6px 12px;
+      color: #888;
+      font-size: 13px;
+    }
+    /* 搜索来源角标 */
+    .src-badge {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      vertical-align: middle;
+      cursor: help;
+    }
+    .src-alist {
+      background: rgba(76, 175, 80, 0.15);
+      color: #81c784;
+      border: 1px solid rgba(76, 175, 80, 0.4);
+    }
+    .src-bfs {
+      background: rgba(255, 167, 38, 0.12);
+      color: #ffb74d;
+      border: 1px solid rgba(255, 167, 38, 0.35);
+    }
+    .src-index {
+      background: rgba(100, 181, 246, 0.12);
+      color: #64b5f6;
+      border: 1px solid rgba(100, 181, 246, 0.35);
+    }
+
+    /* 索引状态横幅 */
+    #index-banner {
+      display: none;
+      padding: 10px 16px;
+      background: linear-gradient(90deg, rgba(255,167,38,0.12), rgba(255,167,38,0.04));
+      border-bottom: 1px solid rgba(255,167,38,0.3);
+      color: #ffb74d;
+      font-size: 13px;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+    }
+    #index-banner.idle {
+      display: flex;
+      background: linear-gradient(90deg, rgba(100,181,246,0.08), rgba(100,181,246,0.02));
+      border-bottom-color: rgba(100,181,246,0.25);
+      color: #90caf9;
+    }
+    #index-banner .ib-text { flex: 1; min-width: 200px; }
+    #index-banner .ib-bar {
+      flex: 1 1 240px;
+      max-width: 400px;
+      height: 6px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 3px;
+      overflow: hidden;
+      position: relative;
+    }
+    #index-banner .ib-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #ffb74d, #ffa726);
+      border-radius: 3px;
+      transition: width 0.5s ease-out;
+      width: 0%;
+    }
+    #index-banner.idle .ib-bar-fill { background: linear-gradient(90deg, #64b5f6, #42a5f5); }
+    #index-banner .ib-rebuild {
+      padding: 4px 10px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 4px;
+      color: inherit;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    #index-banner .ib-rebuild:hover { background: rgba(255,255,255,0.12); }
+    #index-banner .ib-rebuild:disabled { opacity: 0.5; cursor: wait; }
+    #index-banner .ib-rebuild.ib-full { background: rgba(255,87,34,0.08); border-color: rgba(255,87,34,0.25); color: #ff8a65; }
+    #index-banner .ib-rebuild.ib-full:hover { background: rgba(255,87,34,0.15); }
+    .ib-mode { padding: 2px 6px; border-radius: 3px; font-size: 11px; background: rgba(255,255,255,0.06); }
+  </style>
+</head>
+<body>
+  <script id="alist-token" type="application/json">__ALIST_TOKEN__</script>
+  <header>
+    <div class="logo">📁 Alist 浏览</div>
+    <div class="crumbs" id="crumbs">加载中…</div>
+    <div class="actions">
+      <select id="sort" title="排序方式">
+        <option value="name-asc">名称 ↑</option>
+        <option value="name-desc">名称 ↓</option>
+        <option value="date-desc" selected>日期 ↓ (最新优先)</option>
+        <option value="date-asc">日期 ↑ (最早优先)</option>
+        <option value="size-desc">大小 ↓</option>
+        <option value="size-asc">大小 ↑</option>
+      </select>
+      <button id="toggle-type" title="目录/文件分组">分组</button>
+    </div>
+    <div class="global-search" id="global-search-box">
+      <span style="color:#4fc3f7">🔍</span>
+      <input id="global-search" type="search" placeholder="全局搜索文件名…" autocomplete="off" spellcheck="false">
+      <button id="global-search-clear" title="清空 (Esc)" style="display:none">✕</button>
+      <span class="kbd">Ctrl K</span>
+    </div>
+  </header>
+  <div id="index-banner">
+    <span class="ib-text" id="ib-text">⏳ 索引加载中…</span>
+    <div class="ib-bar"><div class="ib-bar-fill" id="ib-bar-fill"></div></div>
+    <button class="ib-rebuild" id="ib-rebuild" title="增量重建(只重扫变化目录)">🔄 重建</button>
+    <button class="ib-rebuild ib-full" id="ib-rebuild-full" title="强制全量重建(忽略缓存,从头扫)">🧹 全量重建</button>
+  </div>
+  <div class="toolbar">
+    <input id="search" type="text" placeholder="过滤当前目录(中英文模糊匹配)…">
+    <span class="count" id="count"></span>
+    <span class="loading" id="loading"></span>
+  </div>
+  <main id="main">加载中…</main>
+  <footer>
+    目录浏览本地代理 · 点击视频跳转 Alist 播放 · 全量排序无分页限制
+  </footer>
+  <div class="tooltip" id="tooltip"></div>
+
+  <script>
+    const VIDEO_EXTS = new Set(["mp4","mkv","ts","m2ts","mov","avi","webm","flv","iso","wmv","mpg","mpeg"]);
+    const ALIST_BASE = location.origin;  // http://localhost:8080
+    const $ = (id) => document.getElementById(id);
+    let allItems = [];        // 当前目录所有文件(全量)
+    let currentSort = "date-desc";
+    let groupByType = true;
+    // 全局搜索状态
+    let currentView = "browse";        // "browse" | "search"
+    let savedBrowsePath = "/";         // 进入搜索前浏览的路径,退出时恢复
+    const searchState = {
+      keywords: "",
+      scope: 0,                         // 0=全部, 1=仅目录, 2=仅文件
+      parent: "/",                      // 搜索起点
+      maxDepth: 2,                      // 递归深度(层),默认 2 层(快速)
+      page: 1,
+      perPage: 50,
+      total: 0,
+      results: [],
+      inflight: 0,                      // 请求序号,过期请求自动失效
+      source: "",                       // "alist"=Alist 自带搜索, "bfs"=代理端 BFS, "index"=本地索引
+    };
+    let searchDebounce = null;
+
+    // 索引状态(由 startIndexPolling 刷新)
+    const indexStatus = {
+      running: false,
+      index_size: 0,
+      dirs_visited: 0,
+      files_collected: 0,
+      current_path: "",
+      completed_human: null,
+      last_duration_sec: 0,
+      max_dirs: 2000,
+    };
+    let indexPollTimer = null;
+
+    function fmtSize(bytes) {
+      if (!bytes) return "0 B";
+      const u = ["B","KB","MB","GB","TB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return (bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1) + " " + u[i];
+    }
+    function fmtDate(iso) {
+      if (!iso) return "";
+      const d = new Date(iso);
+      if (isNaN(d)) return iso;
+      const now = new Date();
+      const diff = (now - d) / 1000;
+      if (diff < 3600) return Math.floor(diff/60) + "分钟前";
+      if (diff < 86400) return Math.floor(diff/3600) + "小时前";
+      if (diff < 86400*7) return Math.floor(diff/86400) + "天前";
+      return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+    }
+    function isVideo(name) {
+      const dot = name.lastIndexOf(".");
+      if (dot < 0) return false;
+      return VIDEO_EXTS.has(name.slice(dot + 1).toLowerCase());
+    }
+    function iconFor(item) {
+      if (item.is_dir) return "📁";
+      if (isVideo(item.name)) return "🎬";
+      const ext = item.name.split(".").pop().toLowerCase();
+      if (["jpg","jpeg","png","gif","webp","bmp"].includes(ext)) return "🖼️";
+      if (["mp3","flac","wav","ape","m4a","ogg"].includes(ext)) return "🎵";
+      if (["srt","ass","ssa","sub"].includes(ext)) return "📝";
+      if (["pdf","epub","mobi","azw3"].includes(ext)) return "📚";
+      if (["zip","rar","7z","tar","gz"].includes(ext)) return "📦";
+      return "📄";
+    }
+    function isNew(item) {
+      if (!item.modified || item.is_dir) return false;
+      const d = new Date(item.modified);
+      const diff = (Date.now() - d) / 1000;
+      return diff < 86400 * 3;  // 3 天内算新
+    }
+
+    async function fetchAllItems(path) {
+      // 全量翻页获取目录所有文件
+      const all = [];
+      let page = 1;
+      const perPage = 500;
+      let total = Infinity;
+      while (all.length < total) {
+        const r = await fetch(`${ALIST_BASE}/api/fs/list`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json", "Authorization": TOKEN},
+          body: JSON.stringify({path, refresh: false, page, per_page: perPage, password: ""}),
+        });
+        const d = await r.json();
+        if (d.code !== 200) throw new Error(d.message || "API error");
+        if (!d.data || !d.data.content) break;
+        all.push(...d.data.content);
+        total = d.data.total || all.length;
+        if (d.data.content.length < perPage) break;
+        page++;
+      }
+      return all;
+    }
+
+    function sortItems(items) {
+      const [field, dir] = currentSort.split("-");
+      const mult = dir === "asc" ? 1 : -1;
+      return items.slice().sort((a, b) => {
+        if (groupByType && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+        let va, vb;
+        if (field === "name") {
+          va = a.name; vb = b.name;
+          return mult * va.localeCompare(vb, "zh-CN");
+        } else if (field === "date") {
+          va = new Date(a.modified || 0).getTime();
+          vb = new Date(b.modified || 0).getTime();
+          return mult * (va - vb);
+        } else if (field === "size") {
+          va = a.size || 0; vb = b.size || 0;
+          return mult * (va - vb);
+        }
+        return 0;
+      });
+    }
+
+    function renderCrumbs(path) {
+      const parts = path.split("/").filter(Boolean);
+      let html = `<a href="#/">根</a>`;
+      let acc = "";
+      for (let i = 0; i < parts.length; i++) {
+        acc += "/" + parts[i];
+        html += `<span class="sep">/</span>`;
+        if (i === parts.length - 1) {
+          html += `<span class="current">${escapeHtml(parts[i])}</span>`;
+        } else {
+          html += `<a href="#${acc}">${escapeHtml(parts[i])}</a>`;
+        }
+      }
+      $("crumbs").innerHTML = html;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+
+    function renderDir(path, items) {
+      renderCrumbs(path);
+      allItems = items;
+
+      const sorted = sortItems(items);
+      const dirs = sorted.filter(i => i.is_dir);
+      const videos = sorted.filter(i => !i.is_dir && isVideo(i.name));
+      const others = sorted.filter(i => !i.is_dir && !isVideo(i.name));
+
+      $("count").textContent = `共 ${items.length} 项:目录 ${dirs.length} · 视频 ${videos.length} · 其他 ${others.length}`;
+      $("loading").textContent = "";
+
+      if (items.length === 0) {
+        $("main").innerHTML = `<div class="empty">空目录</div>`;
+        return;
+      }
+
+      let html = `<div class="item-grid" id="grid">`;
+      for (const it of sorted) {
+        const full = (path === "/" ? "" : path) + "/" + it.name;
+        const cls = it.is_dir ? "dir" : (isVideo(it.name) ? "video" : "");
+        const newCls = isNew(it) ? " new" : "";
+        const meta = it.is_dir
+          ? "目录"
+          : `${fmtSize(it.size)} · ${fmtDate(it.modified)}`;
+        const target = it.is_dir ? `#${full}` : "#";  // 目录跳转,文件由 JS 处理
+        const dataAttrs = it.is_dir ? "" : `data-full="${escapeHtml(full)}"`;
+        html += `<a class="item ${cls}${newCls}" href="${target}" ${dataAttrs}>`;
+        html += `<span class="icon">${iconFor(it)}</span>`;
+        html += `<span class="info"><div class="name">${escapeHtml(it.name)}</div>`;
+        html += `<div class="meta">${meta}</div></span>`;
+        html += `</a>`;
+      }
+      html += `</div>`;
+      $("main").innerHTML = html;
+
+      // 给视频/文件项绑定点击事件(非目录项)
+      document.querySelectorAll(".item:not(.dir)").forEach(el => {
+        el.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const full = el.dataset.full;
+          if (!full) {
+            console.warn("点击的元素没有 data-full");
+            return;
+          }
+          console.log("点击文件:", full, "isVideo:", isVideo(full));
+          if (isVideo(full)) {
+            playInAlist(full);
+          } else {
+            window.open(`${ALIST_BASE}/d${full}`, "_blank");
+          }
+        });
+      });
+
+      $("search").disabled = false;
+      $("search").oninput = applyFilter;
+    }
+
+    function playInAlist(videoPath) {
+      // Alist v3 用 pathname 路由,URL 格式: http://host/path/to/file
+      // 代理会把非特殊路径转发到 Alist,返回网页 HTML
+      const alistPlayUrl = `${ALIST_BASE}${videoPath}`;
+      console.log("跳转 Alist 播放:", alistPlayUrl);
+      window.open(alistPlayUrl, "_blank");
+    }
+
+    function applyFilter() {
+      const q = $("search").value.trim().toLowerCase();
+      const grid = $("grid");
+      if (!grid) return;
+      let visible = 0;
+      for (const el of grid.querySelectorAll(".item")) {
+        const name = el.querySelector(".name").textContent.toLowerCase();
+        const match = !q || name.includes(q);
+        el.style.display = match ? "" : "none";
+        if (match) visible++;
+      }
+      $("count").textContent = `显示 ${visible} / ${allItems.length} 项` +
+        (q ? `(过滤: "${q}")` : `:目录 ${allItems.filter(i=>i.is_dir).length} · 视频 ${allItems.filter(i=>!i.is_dir&&isVideo(i.name)).length}`);
+    }
+
+    // ============== 全局搜索 ==============
+    function debounce(fn, ms) {
+      let t = null;
+      return function(...args) {
+        if (t) clearTimeout(t);
+        t = setTimeout(() => fn.apply(this, args), ms);
+      };
+    }
+
+    function highlightMatch(name, keywords) {
+      // 高亮文件名中匹配关键词的部分(不区分大小写)
+      const escaped = escapeHtml(name);
+      const k = (keywords || "").trim();
+      if (!k) return escaped;
+      const kEscaped = escapeHtml(k).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      try {
+        const re = new RegExp(`(${kEscaped})`, "gi");
+        return escaped.replace(re, "<mark>$1</mark>");
+      } catch (e) {
+        return escaped;
+      }
+    }
+
+    async function globalSearch(keywords, page = 1) {
+      if (!keywords || !keywords.trim()) return;
+      if (!TOKEN) {
+        $("main").innerHTML = `<div class="empty">需要登录才能搜索<br>请先访问 <a href="${ALIST_BASE}/">Alist 主页</a> 登录后刷新此页</div>`;
+        return;
+      }
+      const inflight = ++searchState.inflight;
+      $("main").innerHTML = `<div class="empty">🔍 搜索中…<br><span style="font-size:12px;color:#888">直接从本地索引读取,几乎瞬时</span></div>`;
+      $("loading").textContent = "搜索中…";
+      try {
+        const r = await fetch(`${ALIST_BASE}/__api__/search`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            q: keywords.trim(),
+            parent: searchState.parent,
+            scope: searchState.scope,
+            page,
+            per_page: searchState.perPage,
+            max_depth: searchState.maxDepth,
+          }),
+        });
+        const d = await r.json();
+        if (inflight !== searchState.inflight) return;  // 过期请求,丢弃
+        if (d.code === 202) {
+          // 索引未就绪,显示构建进度
+          const prog = (d.data && d.data.progress) || {};
+          $("loading").textContent = "";
+          $("main").innerHTML = `<div class="empty">
+            📦 ${escapeHtml(d.message || "索引未就绪")}
+            <br><br>
+            <span style="font-size:13px;color:#aaa">
+              已扫描 <strong>${prog.dirs_visited || 0}</strong> 个目录
+              ${prog.running ? ` · 当前: <code>${escapeHtml(prog.current_path || "/")}</code>` : ""}
+            </span>
+            <br><br>
+            <span style="font-size:12px;color:#888">首次构建约需几分钟,构建完成后<b>本次搜索结果会自动出现</b>(无需重输)</span>
+          </div>`;
+          // 记住关键词,索引就绪后自动重跑
+          try { sessionStorage.setItem("pending_search_after_index", keywords.trim()); } catch (e) {}
+          startIndexPolling(true);
+          return;
+        }
+        if (d.code === 429) {
+          throw new Error("⏳ " + (d.message || "上一次搜索还没结束,请稍候"));
+        }
+        if (d.code !== 200) {
+          throw new Error(d.message || "搜索失败");
+        }
+        searchState.keywords = keywords;
+        searchState.page = page;
+        searchState.total = (d.data && d.data.total) || 0;
+        searchState.results = (d.data && d.data.content) || [];
+        searchState.source = d.source || "index";
+        renderSearchResults();
+      } catch (e) {
+        if (inflight !== searchState.inflight) return;
+        $("loading").textContent = "";
+        $("main").innerHTML = `<div class="empty">搜索失败: ${e.message}<br><br>可能是 Token 已失效</div>`;
+      }
+    }
+
+    function renderSearchResults() {
+      const total = searchState.total;
+      const results = searchState.results;
+      const scopeText = ["全部", "仅目录", "仅文件"][searchState.scope];
+      $("crumbs").innerHTML = `<span class="current">🔍 搜索结果</span>`;
+      $("loading").textContent = "";
+      // 来源角标:本地索引 / Alist 自带 / 代理 BFS
+      const idxAge = indexStatus.completed_human ? `建于 ${indexStatus.completed_human}` : "";
+      let sourceBadge;
+      if (searchState.source === "index") {
+        sourceBadge = `<span class="src-badge src-index" title="从本地索引读取(${idxAge},不消耗上游资源)">📦 本地索引 ${idxAge}</span>`;
+      } else if (searchState.source === "alist") {
+        sourceBadge = `<span class="src-badge src-alist" title="由 Alist 服务端搜索">⚡ Alist 自带搜索</span>`;
+      } else {
+        sourceBadge = `<span class="src-badge src-bfs" title="代理端 BFS 遍历">🔄 代理 BFS (depth=${searchState.maxDepth})</span>`;
+      }
+      $("count").innerHTML = `共 ${total} 个结果 · 第 ${searchState.page} 页 · 范围: ${scopeText} · ${sourceBadge}`;
+
+      const parentShort = searchState.parent === "/" ? "整库(/)" : searchState.parent;
+
+      let html = `<div class="search-header">
+        <button class="back-btn" id="back-btn">← 返回浏览</button>
+        <div class="scope-info">
+          关键词: <strong>${escapeHtml(searchState.keywords)}</strong>
+          <span class="sep">·</span>
+          范围: <span class="scope-path">${escapeHtml(parentShort)}</span>
+          <span class="sep">·</span>
+          类型:
+          <select id="scope-select" style="padding:3px 6px;background:#2a3540;border:1px solid #3a4550;border-radius:3px;color:#e6e6e6;font-size:12px;margin-left:4px;">
+            <option value="0" ${searchState.scope===0?"selected":""}>全部</option>
+            <option value="1" ${searchState.scope===1?"selected":""}>仅目录</option>
+            <option value="2" ${searchState.scope===2?"selected":""}>仅文件</option>
+          </select>
+          <span class="sep">·</span>
+          深度:
+          <select id="depth-select" style="padding:3px 6px;background:#2a3540;border:1px solid #3a4550;border-radius:3px;color:#e6e6e6;font-size:12px;margin-left:4px;" title="搜索的目录深度(层数),越深越慢">
+            <option value="1" ${searchState.maxDepth===1?"selected":""}>1 层 (最快)</option>
+            <option value="2" ${searchState.maxDepth===2?"selected":""}>2 层 (推荐)</option>
+            <option value="3" ${searchState.maxDepth===3?"selected":""}>3 层 (慢)</option>
+            <option value="4" ${searchState.maxDepth===4?"selected":""}>4 层 (很慢)</option>
+          </select>
+          <span class="sep">·</span>
+          <label style="cursor:pointer;">
+            <input type="checkbox" id="scope-current" ${searchState.parent !== "/" ? "checked" : ""}>
+            在当前目录搜索
+          </label>
+        </div>
+      </div>`;
+
+      if (results.length === 0) {
+        html += `<div class="empty">未找到匹配 "<strong>${escapeHtml(searchState.keywords)}</strong>" 的内容<br><br>提示:试试更短的关键词,增大<strong>深度</strong>,或调整<strong>范围/类型</strong>筛选</div>`;
+      } else {
+        html += `<div id="search-results">`;
+        for (const r of results) {
+          // Alist 搜索结果包含 path 字段(完整路径),优先使用
+          let full = r.path;
+          if (!full) {
+            const parent = r.parent || searchState.parent;
+            full = (parent === "/" ? "" : parent) + "/" + r.name;
+          }
+          const cls = r.is_dir ? "dir" : (isVideo(r.name) ? "video" : "");
+          const date = r.modified ? fmtDate(r.modified) : "";
+          const size = r.is_dir ? "" : fmtSize(r.size || 0);
+          // 路径展示:用淡色显示父目录,高亮显示文件名
+          const parentDisplay = full.substring(0, full.length - r.name.length);
+          html += `<div class="search-result ${cls}" data-full="${escapeHtml(full)}" data-isdir="${r.is_dir ? "true" : "false"}">`;
+          html += `<span class="icon">${iconFor(r)}</span>`;
+          html += `<span class="info">`;
+          html += `<div class="name">${highlightMatch(r.name, searchState.keywords)}</div>`;
+          html += `<div class="meta">`;
+          html += `<span class="parent-path" title="${escapeHtml(full)}">${escapeHtml(parentDisplay || "/")}</span>`;
+          if (size) html += `<span class="sep">·</span>${size}`;
+          if (date) html += `<span class="sep">·</span>${date}`;
+          html += `</div>`;
+          html += `</span>`;
+          html += `</div>`;
+        }
+        html += `</div>`;
+
+        // 分页
+        const totalPages = Math.ceil(total / searchState.perPage);
+        if (totalPages > 1) {
+          html += `<div class="search-pagination">`;
+          html += `<button ${searchState.page <= 1 ? "disabled" : ""} data-page="${searchState.page - 1}">‹ 上一页</button>`;
+          html += `<span class="page-info">第 ${searchState.page} / ${totalPages} 页</span>`;
+          html += `<button ${searchState.page >= totalPages ? "disabled" : ""} data-page="${searchState.page + 1}">下一页 ›</button>`;
+          html += `</div>`;
+        }
+      }
+
+      $("main").innerHTML = html;
+
+      // 绑定事件
+      $("back-btn").addEventListener("click", exitSearch);
+      const scopeSel = $("scope-select");
+      if (scopeSel) {
+        scopeSel.addEventListener("change", (e) => {
+          searchState.scope = parseInt(e.target.value, 10);
+          globalSearch(searchState.keywords, 1);
+        });
+      }
+      const depthSel = $("depth-select");
+      if (depthSel) {
+        depthSel.addEventListener("change", (e) => {
+          searchState.maxDepth = parseInt(e.target.value, 10);
+          globalSearch(searchState.keywords, 1);
+        });
+      }
+      const scopeCur = $("scope-current");
+      if (scopeCur) {
+        scopeCur.addEventListener("change", (e) => {
+          searchState.parent = e.target.checked
+            ? (location.hash.slice(1) || "/")
+            : "/";
+          globalSearch(searchState.keywords, 1);
+        });
+      }
+      document.querySelectorAll(".search-pagination button").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const p = parseInt(btn.dataset.page, 10);
+          if (p >= 1) globalSearch(searchState.keywords, p);
+        });
+      });
+      document.querySelectorAll(".search-result").forEach(el => {
+        el.addEventListener("click", () => {
+          const full = el.dataset.full;
+          const isdir = el.dataset.isdir === "true";
+          if (isdir) {
+            // 进入目录:先退出搜索,再跳转到该目录
+            exitSearch();
+            location.hash = full;
+          } else if (isVideo(full)) {
+            playInAlist(full);
+          } else {
+            window.open(`${ALIST_BASE}/d${full}`, "_blank");
+          }
+        });
+      });
+    }
+
+    function enterSearch(keywords) {
+      if (!keywords || !keywords.trim()) return;
+      savedBrowsePath = location.hash.slice(1) || "/";
+      currentView = "search";
+      $("global-search-clear").style.display = "";
+      $("search").value = "";  // 清空本地过滤器,避免混淆
+      globalSearch(keywords, 1);
+    }
+
+    function exitSearch() {
+      currentView = "browse";
+      $("global-search").value = "";
+      $("global-search-clear").style.display = "none";
+      // 恢复浏览视图
+      if (location.hash.slice(1) !== savedBrowsePath) {
+        location.hash = savedBrowsePath;
+      } else {
+        route();
+      }
+    }
+
+    async function route() {
+      // 搜索模式下不响应 hash 变化(用户在搜索中,不该被路径变化打断)
+      if (currentView === "search") return;
+      const hash = decodeURIComponent(location.hash.slice(1)) || "/";
+      savedBrowsePath = hash;
+      $("main").innerHTML = "加载中…";
+      $("loading").textContent = "正在获取目录…";
+      $("search").value = "";
+      try {
+        const items = await fetchAllItems(hash);
+        renderDir(hash, items);
+      } catch (e) {
+        $("loading").textContent = "";
+        $("main").innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    // 事件绑定
+    window.addEventListener("hashchange", route);
+    window.addEventListener("load", route);
+    $("sort").addEventListener("change", (e) => {
+      currentSort = e.target.value;
+      if (allItems.length > 0 && currentView === "browse") renderDir(location.hash.slice(1) || "/", allItems);
+    });
+    $("toggle-type").addEventListener("click", (e) => {
+      groupByType = !groupByType;
+      e.target.classList.toggle("active", groupByType);
+      if (allItems.length > 0 && currentView === "browse") renderDir(location.hash.slice(1) || "/", allItems);
+    });
+    $("search").addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.target.value = ""; applyFilter(); }
+    });
+
+    // 全局搜索事件
+    const gsInput = $("global-search");
+    gsInput.addEventListener("input", debounce((e) => {
+      const v = e.target.value.trim();
+      $("global-search-clear").style.display = v ? "" : "none";
+      if (!v) {
+        if (currentView === "search") exitSearch();
+        return;
+      }
+      if (currentView !== "search") {
+        enterSearch(v);
+      } else {
+        globalSearch(v, 1);
+      }
+    }, 300));
+
+    gsInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (currentView === "search") exitSearch();
+        gsInput.blur();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const v = gsInput.value.trim();
+        if (v) {
+          if (currentView !== "search") enterSearch(v);
+          else globalSearch(v, 1);
+        }
+      }
+    });
+
+    $("global-search-clear").addEventListener("click", () => {
+      if (currentView === "search") exitSearch();
+      else { gsInput.value = ""; $("global-search-clear").style.display = "none"; }
+      gsInput.focus();
+    });
+
+    // 全局快捷键
+    document.addEventListener("keydown", (e) => {
+      const tag = (document.activeElement && document.activeElement.tagName) || "";
+      const isInput = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+      // Ctrl+K / Cmd+K → 聚焦搜索
+      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        gsInput.focus();
+        gsInput.select();
+        return;
+      }
+      // "/" 键(在非输入框中)→ 聚焦搜索
+      if (e.key === "/" && !isInput) {
+        e.preventDefault();
+        gsInput.focus();
+        gsInput.select();
+      }
+    });
+
+    // Token 获取优先级:代理注入 > URL 参数 > localStorage
+    let TOKEN = "";
+    const urlParams = new URLSearchParams(location.search);
+
+    // 从代理注入的 script 标签读取
+    // 注意:代理会把占位符替换为实际 token,所以不能用字符串字面量比较
+    const injectedToken = document.getElementById("alist-token")?.textContent?.trim();
+    // 占位符原长度是 16,实际 token 长度 > 100,用长度判断
+    if (injectedToken && injectedToken.length > 50) {
+      TOKEN = injectedToken;
+      try { localStorage.setItem("alist_token", TOKEN); } catch(e) {}
+    }
+
+    // fallback: URL 参数或 localStorage
+    if (!TOKEN) {
+      TOKEN = urlParams.get("token") || "";
+    }
+    if (!TOKEN) {
+      try { TOKEN = localStorage.getItem("alist_token") || ""; } catch(e) {}
+    }
+
+    if (!TOKEN) {
+      // 提示登录
+      $("main").innerHTML = `
+        <div class="empty">
+          <h3>需要登录</h3>
+          <p>请先访问 <a href="${ALIST_BASE}/">Alist 主页</a> 登录,然后回来刷新此页。</p>
+          <p>或在此输入 Token:<br>
+          <input type="text" id="token-input" placeholder="粘贴 Alist token" style="width:400px;padding:8px;margin:8px;background:#0f1419;border:1px solid #2a3540;color:#e6e6e6;border-radius:4px;">
+          <button onclick="saveToken()" style="padding:8px 16px;background:#4fc3f7;border:none;border-radius:4px;cursor:pointer;color:#0f1419;">保存</button>
+          </p>
+        </div>
+      `;
+    }
+
+    function saveToken() {
+      const t = document.getElementById("token-input").value.trim();
+      if (t) {
+        try { localStorage.setItem("alist_token", t); } catch(e) {}
+        TOKEN = t;
+        location.reload();
+      }
+    }
+
+    // ============== 索引状态轮询 ==============
+    async function pollIndexStatus() {
+      try {
+        const r = await fetch(`${ALIST_BASE}/__api__/index/status`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        if (d.code !== 200) return;
+        Object.assign(indexStatus, d.data);
+        renderIndexBanner();
+        // 当索引首次就绪时,如果当前在搜索页且结果为空,自动重跑搜索
+        if (!d.data.running && d.data.index_size > 0) {
+          const pendingKw = sessionStorage.getItem("pending_search_after_index");
+          if (pendingKw && currentView === "search") {
+            sessionStorage.removeItem("pending_search_after_index");
+            globalSearch(pendingKw, 1);
+          }
+        }
+      } catch (e) {
+        // 静默失败,继续轮询
+      }
+    }
+
+    function renderIndexBanner() {
+      const banner = $("index-banner");
+      if (!banner) return;
+      const ibText = $("ib-text");
+      const ibBar = $("ib-bar-fill");
+      const ibRebuild = $("ib-rebuild");
+      const ibRebuildFull = $("ib-rebuild-full");
+      if (!ibText || !ibBar) return;
+
+      const s = indexStatus;
+      const maxDirs = s.max_dirs || 2000;
+      const pct = Math.min(100, Math.round((s.dirs_visited / maxDirs) * 100));
+      const mode = s.current_mode || s.last_mode || "";
+
+      if (s.running) {
+        banner.classList.remove("idle");
+        banner.style.display = "flex";
+        const cur = s.current_path && s.current_path !== "/" ? s.current_path : "(根)";
+        const modeBadge = mode === "incremental"
+          ? `<span class="ib-mode" title="按目录签名剪枝,只重扫变化的子树">📈 增量</span>`
+          : `<span class="ib-mode" title="从头扫描整个目录树">📦 全量</span>`;
+        ibText.innerHTML = `⏳ ${mode === "incremental" ? "增量重建" : "全量重建"}中 · ${modeBadge} · `
+          + `已扫描 <strong>${s.dirs_visited}</strong> / ${maxDirs} 目录 · `
+          + `${s.files_collected} 文件 · 当前: <code>${escapeHtml(cur)}</code>`;
+        ibBar.style.width = pct + "%";
+        if (ibRebuild) ibRebuild.disabled = true;
+        if (ibRebuildFull) ibRebuildFull.disabled = true;
+      } else if (s.index_size > 0) {
+        banner.classList.add("idle");
+        banner.style.display = "flex";
+        const isIncr = s.last_mode === "incremental";
+        const modeBadge = isIncr
+          ? `<span class="ib-mode" title="上次为增量扫描">📈 增量</span>`
+          : `<span class="ib-mode" title="上次为全量扫描">📦 全量</span>`;
+        const extra = isIncr
+          ? ` · 跳过 <strong>${s.last_skipped || 0}</strong> 未变化目录,重扫 <strong>${s.last_rescanned || 0}</strong>`
+          : "";
+        ibText.innerHTML = `✅ 索引就绪 · ${modeBadge} · 共 <strong>${s.index_size}</strong> 条目 · `
+          + `${s.completed_human || "?"} 构建 · 耗时 ${s.last_duration_sec || "?"}s${extra}`;
+        ibBar.style.width = "100%";
+        if (ibRebuild) ibRebuild.disabled = false;
+        if (ibRebuildFull) ibRebuildFull.disabled = false;
+      } else {
+        banner.classList.add("idle");
+        banner.style.display = "flex";
+        ibText.innerHTML = `⏳ 索引初始化中…`;
+        ibBar.style.width = "0%";
+        if (ibRebuild) ibRebuild.disabled = true;
+        if (ibRebuildFull) ibRebuildFull.disabled = true;
+      }
+    }
+
+    function startIndexPolling(fast = false) {
+      if (indexPollTimer) {
+        clearTimeout(indexPollTimer);
+        indexPollTimer = null;
+      }
+      const tick = () => {
+        pollIndexStatus().finally(() => {
+          // 构建中/未就绪时加快轮询(1.5s),稳定后 6s
+          const interval = (indexStatus.running || indexStatus.index_size === 0) ? 1500 : 6000;
+          indexPollTimer = setTimeout(tick, interval);
+        });
+      };
+      tick();
+    }
+
+    async function triggerRebuild(forceFull = false) {
+      const btn = forceFull ? $("ib-rebuild-full") : $("ib-rebuild");
+      if (btn) btn.disabled = true;
+      try {
+        const url = `${ALIST_BASE}/__api__/index/start` + (forceFull ? "?force_full=true" : "");
+        await fetch(url, { method: "POST" });
+      } catch (e) {
+        // 忽略
+      }
+      // 立即刷新一次
+      pollIndexStatus();
+    }
+
+    // 页面加载时启动轮询 + 绑定重建按钮
+    document.addEventListener("DOMContentLoaded", () => {
+      startIndexPolling(true);
+      const btn = $("ib-rebuild");
+      if (btn) btn.addEventListener("click", () => triggerRebuild(false));
+      const btnFull = $("ib-rebuild-full");
+      if (btnFull) btnFull.addEventListener("click", () => triggerRebuild(true));
+    });
+  </script>
+</body>
+</html>

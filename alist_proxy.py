@@ -31,6 +31,7 @@ import time
 import threading
 import sys
 import os
+import base64
 import logging
 import hashlib
 import collections
@@ -54,6 +55,529 @@ URL_REFRESH_MARGIN = 60       # 距过期不足 60 秒时认为 URL 即将失效
 MAX_RETRY_ON_403 = 2          # 遇到 403 时最多重试次数
 UPSTREAM_TIMEOUT = 30         # 上游请求超时(秒)
 CHUNK_SIZE = 64 * 1024        # 流式转发块大小
+HLS_RETRY_DELAYS = (2, 4, 8)   # video_preview 失败后等待秒数;总尝试 = 1 + len(delays) = 4 次
+
+# 小雅魔改版 Alist 页面里塞的兜底脚本:阿里云盘 auto-save 被审/删后,
+# 页面会显示 "NotFound.File: ... cannot be found" 文案。这段 JS 用
+# MutationObserver 盯着 DOM 出现这段文本,触发后自动把视频源切到代理
+# /__hls__/ 通道续播(share 带宽,慢但能播;会员带宽留给小雅页自己的 auto-save 路径)。
+PROXY_FALLBACK_JS = r"""
+(function(){
+'use strict';
+const TEMPLATES=['FHD','QHD','HD','SD','LD'];
+// 只匹配阿里云盘错误消息的精确模式,避免误伤页面里的"404"、教程文案等
+const ERR_RE=/(?:notfound[\.\s_]?file|the resource file can ?not be found|资源.{0,8}找.{0,8}不到)/i;
+let active=false, idx=0, domHit=false, fetchHit=false;
+
+function alistPath(){
+  let p=decodeURIComponent(location.pathname);
+  if(p.startsWith('/'))p=p.slice(1);
+  return p?'/'+p:null;
+}
+function m3u8For(t){
+  const p=alistPath(); if(!p)return null;
+  const k=p+'__tmpl__'+t;
+  return '/__hls__/'+encodeURIComponent(k)+'/media.m3u8';
+}
+
+function switchSource(url, tmpl){
+  // 1) ArtPlayer 实例(各种可能命名)
+  const candidates=[
+    ()=>window.art,
+    ()=>window.AP&&window.AP.instance,
+    ()=>window.__art,
+    ()=>document.querySelector('.art-video-player')&&document.querySelector('.art-video-player').__art,
+  ];
+  for(const get of candidates){
+    try{
+      const art=get();
+      if(art){
+        if(typeof art.switchUrl==='function'){
+          art.switchUrl(url,{type:'hls'});
+          console.log('[proxy-fallback] ArtPlayer.switchUrl ok, tmpl=',tmpl);
+          return true;
+        }
+        if('url' in art){art.url=url;return true;}
+      }
+    }catch(e){console.warn('[proxy-fallback] ArtPlayer hook fail',e);}
+  }
+  // 2) 任意 <video> 元素
+  const vids=document.querySelectorAll('video');
+  for(const v of vids){
+    try{
+      v.pause();v.removeAttribute('src');v.load();
+    }catch(e){}
+    if(window.Hls&&window.Hls.isSupported()){
+      try{
+        const h=new window.Hls();h.loadSource(url);h.attachMedia(v);
+        v.play().catch(()=>{});
+        console.log('[proxy-fallback] hls.js 接管 video, tmpl=',tmpl);
+        return true;
+      }catch(e){console.warn('[proxy-fallback] hls.js fail',e);}
+    }
+    try{v.src=url;v.load();v.play().catch(()=>{});return true;}catch(e){}
+  }
+  // 3) 都没找到 → 小雅已经把 video/ArtPlayer 删了。错误文案已渲染。
+  //    隐藏错误 UI,在合理位置塞一个新 <video> + hls.js。
+  return injectFreshPlayer(url, tmpl);
+}
+
+function loadHlsJs(){
+  // 动态加载 hls.js(优先 CDN,失败回退到代理自己 host 的本地副本)
+  return new Promise((resolve,reject)=>{
+    if(window.Hls&&window.Hls.isSupported()){resolve();return;}
+    const cdnList=[
+      'https://cdn.jsdelivr.net/npm/hls.js@1.5.13',
+      'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js',
+      '/__static__/hls.min.js',
+    ];
+    let idx=0;
+    function tryNext(){
+      if(idx>=cdnList.length){reject(new Error('hls.js 全部源失败'));return;}
+      const s=document.createElement('script');
+      s.src=cdnList[idx++];
+      s.onload=()=>{
+        if(window.Hls&&window.Hls.isSupported()){
+          console.log('[proxy-fallback] hls.js 加载成功 from',s.src);
+          resolve();
+        }else tryNext();
+      };
+      s.onerror=()=>{console.warn('[proxy-fallback] hls.js load fail',s.src);tryNext();};
+      document.head.appendChild(s);
+    }
+    tryNext();
+  });
+}
+
+function injectFreshPlayer(url, tmpl){
+  // 找错误文案所在容器,塞到它的父级以保持视觉位置
+  let host=null;
+  for(const el of document.querySelectorAll('body, body *')){
+    if(el.children&&el.children.length>0)continue;
+    if(!isErrText(el.textContent||''))continue;
+    const r=el.getBoundingClientRect&&el.getBoundingClientRect();
+    if(r&&(r.width===0||r.height===0))continue;
+    let p=el;
+    // 往上找一个尺寸足够大的容器(放视频用)
+    for(let i=0;i<6&&p.parentElement;i++){
+      p=p.parentElement;
+      const pr=p.getBoundingClientRect&&p.getBoundingClientRect();
+      if(pr&&pr.width>=400&&pr.height>=200){host=p;break;}
+    }
+    if(host)break;
+  }
+  if(!host)host=document.body;
+
+  // 把所有错误文本叶子节点隐藏(避免和视频一起显示)
+  document.querySelectorAll('*').forEach(el=>{
+    if(el.children&&el.children.length>0)return;
+    if(isErrText(el.textContent||'')){el.style.display='none';}
+  });
+
+  // 注入新 video(立即插入,避免布局抖动)
+  const v=document.createElement('video');
+  v.id='__proxy_fallback_video__';
+  v.controls=true;v.autoplay=true;
+  v.style.cssText='display:block;width:100%;max-width:1280px;margin:16px auto;background:#000;';
+  if(host.firstChild)host.insertBefore(v,host.firstChild);
+  else host.appendChild(v);
+
+  // 异步拉 hls.js 然后接管
+  loadHlsJs().then(()=>{
+    try{
+      const h=new window.Hls();
+      h.loadSource(url);
+      h.attachMedia(v);
+      v.play().catch(()=>{});
+      console.log('[proxy-fallback] 注入新 <video> + hls.js, tmpl=',tmpl);
+    }catch(e){
+      console.warn('[proxy-fallback] hls.js attach fail',e);
+      try{v.src=url;v.load();v.play().catch(()=>{});}catch(_){}
+    }
+  }).catch(e=>{
+    console.warn('[proxy-fallback] 拉 hls.js 失败,退到 native src',e);
+    try{v.src=url;v.load();v.play().catch(()=>{});}catch(_){}
+  });
+  return true;
+}
+
+function fallback(reason){
+  if(active)return;
+  active=true;
+  console.log('[proxy-fallback] 触发,原因=',reason,'path=',alistPath());
+  function next(){
+    if(idx>=TEMPLATES.length){console.error('[proxy-fallback] 所有模板都失败');return;}
+    const t=TEMPLATES[idx++],u=m3u8For(t);
+    if(!u){console.warn('[proxy-fallback] 路径解析失败');return;}
+    if(switchSource(u,t))return;
+    setTimeout(next,800);
+  }
+  next();
+}
+
+// ---- 1. DOM 监听:小雅页面把 NotFound 文案塞到 DOM 里 ----
+function isErrText(s){return s&&ERR_RE.test(s);}
+function checkEl(el){
+  if(!el)return false;
+  const txt=(el.textContent||'').trim();
+  if(!isErrText(txt))return false;
+  // 误报过滤:忽略不可见/太小/太短的元素
+  const r=el.getBoundingClientRect&&el.getBoundingClientRect();
+  if(r&&(r.width===0||r.height===0))return false;
+  if(txt.length<10)return false;
+  return true;
+}
+const mo=new MutationObserver((muts)=>{
+  for(const m of muts){
+    if(m.addedNodes){
+      for(const n of m.addedNodes){
+        if(checkEl(n)){fallback('dom-added');return;}
+        if(n.querySelectorAll){
+          for(const sub of n.querySelectorAll('*')){
+            if(checkEl(sub)){fallback('dom-added-sub');return;}
+          }
+        }
+      }
+    }
+    if(m.type==='characterData'&&m.target){
+      if(isErrText(m.target.data||'')){fallback('dom-text');return;}
+    }
+  }
+});
+if(document.body){
+  mo.observe(document.body,{childList:true,subtree:true,characterData:true});
+}else{
+  document.addEventListener('DOMContentLoaded',()=>mo.observe(document.body,{childList:true,subtree:true,characterData:true}),{once:true});
+}
+
+// ---- 2. fetch hook:捕获 API 响应里夹带 NotFound 的 ----
+if(window.fetch&&!window.__proxy_fetch_hooked){
+  window.__proxy_fetch_hooked=true;
+  const orig=window.fetch.bind(window);
+  window.fetch=function(...args){
+    return orig(...args).then(r=>{
+      if(!r.ok&&r.status>=400){
+        try{
+          r.clone().text().then(t=>{
+            if(isErrText(t))fallback('fetch:'+r.status);
+          }).catch(()=>{});
+        }catch(e){}
+      }
+      return r;
+    });
+  };
+}
+
+// ---- 3. 不做初始扫描 ----
+// 初始 DOM 里可能有教程/版本号/无关文案含"cannot be found"等字样,会误触发。
+// 只靠 MutationObserver 监听新出现的错误节点。ArtPlayer 自身报错通常会
+// 渲染一段错误文本到 DOM,会被 observer 捕获;若抓不到,用户可手动刷一次。
+
+// ---- 4. 字幕注入:小雅页走的不是代理 /__hls__/ 时,也能让 ArtPlayer 出字幕选择 ----
+// 小雅页面直接读阿里云盘的原始 m3u8(没字幕声明),所以 ArtPlayer 看不到字幕。
+// 这里主动调 video_preview 拿字幕列表,塞 <track> 元素到 <video> 里。
+// ArtPlayer 会从 video.textTracks 里读出可选字幕并暴露给 UI。
+function getToken(){
+  // 尝试从 localStorage / sessionStorage / 全局变量拿 Alist token
+  try{
+    for(const k of ['token','alist-token','Authorization']){
+      const v=localStorage.getItem(k);
+      if(v&&v.length>10)return v.replace(/^"|"$/g,'');
+    }
+    for(const k of ['token','alist-token']){
+      const v=sessionStorage.getItem(k);
+      if(v&&v.length>10)return v.replace(/^"|"$/g,'');
+    }
+    if(window.ALIST&&window.ALIST.token)return window.ALIST.token;
+    // cookie 兜底
+    const m=document.cookie.match(/(?:token|authorization)=([^;]+)/i);
+    if(m)return decodeURIComponent(m[1]);
+  }catch(e){}
+  return '';
+}
+
+function tryInjectSubtitles(){
+  const p=alistPath();
+  // 同路径冷却 30s(避免 hls.js 反复重建 video 把 tryInject 反复触发)
+  const now=Date.now();
+  if(tryInjectSubtitles._lastPath===p && now-(tryInjectSubtitles._lastAt||0)<30000){
+    return Promise.resolve();
+  }
+  tryInjectSubtitles._lastPath=p;
+  tryInjectSubtitles._lastAt=now;
+  // 同一路径已成功注入过,就别再调 API
+  if(tryInjectSubtitles._donePaths&&tryInjectSubtitles._donePaths[p])return Promise.resolve();
+
+  console.log('[proxy-fallback] tryInject: path=',p);
+  if(!p){console.warn('[proxy-fallback] tryInject: 路径解析失败');return Promise.resolve();}
+  const token=getToken();
+  return fetch('/api/fs/other',{method:'POST',headers:{
+      'Content-Type':'application/json',
+      'Authorization': token,
+    },body:JSON.stringify({path:p,password:'',method:'video_preview'})})
+  .then(r=>{
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  })
+  .then(d=>{
+    const innerCode=d&&d.code;
+    const innerMsg=(d&&d.message)||'';
+    // Alist 冷启动:HTTP 200 但内层 code=500 "Loading storage, please wait"
+    if(innerCode===500 && /loading storage/i.test(innerMsg)){
+      console.log('[proxy-fallback] Alist storage loading,稍后再试');
+      throw new Error('LOADING');
+    }
+    if(innerCode!==200){
+      console.log('[proxy-fallback] video_preview inner code=',innerCode,'msg=',innerMsg);
+      throw new Error('INNER '+innerCode);
+    }
+    const subs=(((d.data||{}).video_preview_play_info)||{}).live_transcoding_subtitle_task_list||[];
+    console.log('[proxy-fallback] video_preview subs=',subs.length);
+    const vids=document.querySelectorAll('video');
+    console.log('[proxy-fallback] 当前 <video> 数=',vids.length);
+    if(vids.length===0){console.warn('[proxy-fallback] 找不到 <video>');return false;}
+    const v=vids[0];
+    v.querySelectorAll('track[data-proxy-sub]').forEach(t=>t.remove());
+    let added=0;
+    for(let i=0;i<subs.length;i++){
+      const sub=subs[i];
+      if(!sub||sub.status!=='finished'||!sub.url)continue;
+      const lang=sub.language||'';
+      const enc=btoa(unescape(encodeURIComponent(sub.url))).replace(/=/g,'');
+      const t=document.createElement('track');
+      t.kind='subtitles';
+      t.label=lang.toUpperCase()||lang;
+      t.srclang=lang;
+      t.src='/__subtitle__/'+enc;
+      t.dataset.proxySub='1';
+      if(i===0){t.default=true;}
+      v.appendChild(t);
+      added++;
+    }
+    console.log('[proxy-fallback] 字幕注入',added,'条');
+    tryAddSubsViaArtPlayer(subs);
+    // 字幕轨已经进了 <video>,画一个浮动切换面板(ArtPlayer 默认不显示多字幕 UI)
+    if(added>0)buildSubtitlePanel();
+    if(added>0){
+      tryInjectSubtitles._donePaths=tryInjectSubtitles._donePaths||{};
+      tryInjectSubtitles._donePaths[p]=true;
+    }
+    return added>0;
+  }).catch(e=>{
+    // LOADING:3s 后再试一次;其它错只打日志不再重试
+    if(e&&e.message==='LOADING'){
+      setTimeout(()=>tryInjectSubtitles(),3000);
+    }else if(e&&/HTTP 5/.test(e.message)){
+      console.log('[proxy-fallback] video_preview 上游 5xx,稍后再试');
+      setTimeout(()=>tryInjectSubtitles(),10000);
+    }else{
+      console.log('[proxy-fallback] 字幕注入结束(本路径):',e&&e.message);
+    }
+  });
+}
+
+function tryAddSubsViaArtPlayer(subs){
+  const finished=subs.filter(s=>s&&s.status==='finished'&&s.url);
+  if(finished.length===0)return;
+  const candidates=[
+    ()=>window.art,
+    ()=>window.AP&&window.AP.instance,
+    ()=>document.querySelector('.art-video-player')?.__art,
+  ];
+  for(const get of candidates){
+    try{
+      const inst=get();
+      if(inst){
+        const enc=u=>btoa(unescape(encodeURIComponent(u))).replace(/=/g,'');
+        finished.forEach((s,i)=>{
+          const lang=s.language||'';
+          if(typeof inst.addTrack==='function'){
+            try{inst.addTrack({url:'/__subtitle__/'+enc(s.url),lang:lang,type:'SUBTITLES',name:lang,default:i===0});}catch(e){}
+          }
+          if(inst.subtitle&&inst.subtitle.switch){
+            try{inst.subtitle.switch('/__subtitle__/'+enc(s.url));}catch(e){}
+          }
+        });
+        console.log('[proxy-fallback] 通过 ArtPlayer/hls.js 实例也加了字幕');
+        return;
+      }
+    }catch(e){}
+  }
+}
+
+// 在页面右上角画一个浮动面板:列出所有 proxy 注入的字幕轨 + 关闭选项
+// 直接操作 video.textTracks[i].mode = 'showing' 切换
+function buildSubtitlePanel(){
+  const v=document.querySelector('video');
+  if(!v)return;
+  // 等 track 加载完
+  let tries=0;
+  function attempt(){
+    const tracks=Array.from(v.textTracks).filter(t=>t&&t.kind==='subtitles');
+    if(tracks.length===0){
+      if(tries++<10)setTimeout(attempt,300);
+      return;
+    }
+    // 已建过就只更新
+    let panel=document.getElementById('__proxy_sub_panel');
+    const existed=!!panel;
+    // 确保有一个常驻的"字幕"小按钮,点它能开/关 panel
+    let toggle=document.getElementById('__proxy_sub_toggle');
+    if(!toggle){
+      toggle=document.createElement('div');
+      toggle.id='__proxy_sub_toggle';
+      toggle.textContent='字幕';
+      toggle.title='字幕(代理注入)';
+      toggle.style.cssText=[
+        'position:fixed','top:80px','right:20px','z-index:999998',
+        'background:rgba(15,20,25,0.92)','border:1px solid #2a3540',
+        'border-radius:6px','padding:6px 12px','color:#4fc3f7',
+        'font:600 13px -apple-system,sans-serif','cursor:pointer',
+        'user-select:none','box-shadow:0 4px 12px rgba(0,0,0,0.4)',
+      ].join(';');
+      document.body.appendChild(toggle);
+    }
+    if(!panel){
+      panel=document.createElement('div');
+      panel.id='__proxy_sub_panel';
+      panel.style.cssText=[
+        'position:fixed','top:80px','right:20px','z-index:999999',
+        'background:rgba(15,20,25,0.92)','border:1px solid #2a3540',
+        'border-radius:8px','padding:8px 6px','color:#e8e8e8',
+        'font:13px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif',
+        'min-width:180px','max-width:280px',
+        'box-shadow:0 6px 24px rgba(0,0,0,0.5)',
+        'user-select:none','backdrop-filter:blur(8px)',
+      ].join(';');
+      const head=document.createElement('div');
+      head.style.cssText='display:flex;justify-content:space-between;align-items:center;padding:2px 6px 6px;border-bottom:1px solid #2a3540;margin-bottom:4px;';
+      const title=document.createElement('span');
+      title.textContent='字幕(代理注入)';
+      title.style.cssText='font-weight:600;color:#4fc3f7;';
+      const close=document.createElement('span');
+      close.textContent='×';
+      close.style.cssText='cursor:pointer;color:#888;font-size:18px;line-height:1;padding:0 4px;';
+      close.onclick=()=>{panel.style.display='none';toggle.style.display='';};
+      head.appendChild(title);head.appendChild(close);
+      panel.appendChild(head);
+      document.body.appendChild(panel);
+      // 初始 panel 显示,toggle 隐藏(panel 开着时 toggle 不必重复出现)
+      toggle.style.display='none';
+      toggle.onclick=()=>{
+        const show=panel.style.display==='none';
+        panel.style.display=show?'':'none';
+        toggle.style.display=show?'none':'';
+      };
+    }else{
+      // 重建时只刷新内容区;保持 toggle / panel 当前显示状态
+      while(panel.children.length>1)panel.removeChild(panel.lastChild);
+    }
+
+    function makeItem(label, action, isOff){
+      const btn=document.createElement('div');
+      btn.textContent=label;
+      btn.style.cssText=[
+        'padding:6px 10px','cursor:pointer','border-radius:4px',
+        'margin-top:2px','transition:background .12s','white-space:nowrap',
+        'overflow:hidden','text-overflow:ellipsis',
+      ].join(';');
+      btn.onmouseover=()=>{if(!btn.dataset.active)btn.style.background='#1f2933';};
+      btn.onmouseout=()=>{if(!btn.dataset.active)btn.style.background='transparent';};
+      btn.onclick=()=>{
+        action();
+        updateActive();
+      };
+      panel.appendChild(btn);
+      return btn;
+    }
+    const offBtn=makeItem('关闭字幕',()=>{
+      for(const t of v.textTracks)t.mode='hidden';
+    },true);
+    offBtn.dataset.kind='off';
+
+    const trackBtns=[];
+    for(let i=0;i<v.textTracks.length;i++){
+      const t=v.textTracks[i];
+      if(!t||t.kind!=='subtitles')continue;
+      const idx=i;
+      const lang=t.language||'';
+      const lbl=t.label||(lang?lang.toUpperCase():('字幕'+(trackBtns.length+1)));
+      const btn=makeItem('▶ '+lbl,()=>{
+        for(const x of v.textTracks)x.mode='hidden';
+        t.mode='showing';
+      });
+      btn.dataset.kind='track';
+      btn.dataset.idx=idx;
+      trackBtns.push({btn,track:t});
+    }
+
+    function updateActive(){
+      let anyOn=false;
+      for(const {btn,track} of trackBtns){
+        const on=track.mode==='showing';
+        if(on){
+          btn.style.background='#4fc3f7';
+          btn.style.color='#0f1419';
+          btn.dataset.active='1';
+          anyOn=true;
+        }else{
+          btn.style.background='transparent';
+          btn.style.color='#e8e8e8';
+          btn.dataset.active='0';
+        }
+      }
+      if(!anyOn){
+        offBtn.style.background='#4fc3f7';
+        offBtn.style.color='#0f1419';
+        offBtn.dataset.active='1';
+      }else{
+        offBtn.style.background='transparent';
+        offBtn.style.color='#e8e8e8';
+        offBtn.dataset.active='0';
+      }
+    }
+    // 监听 track mode 变化(被 ArtPlayer 自动切时也更新 UI)
+    for(const t of v.textTracks){
+      if(t&&t.addEventListener)t.addEventListener('change',updateActive);
+    }
+    updateActive();
+    console.log('[proxy-fallback] 字幕面板已建,共',trackBtns.length,'条字幕(之前',existed?'已存在':'新建',')');
+  }
+  attempt();
+}
+
+// 等 <video> 出现就注入一次;hls.js 频繁重建 video,用 path 冷却避免风暴
+function watchVideoAndInject(){
+  if(document.querySelector('video')){tryInjectSubtitles();buildSubtitlePanel();}
+  const mo2=new MutationObserver(()=>{
+    if(document.querySelector('video') && !watchVideoAndInject._t){
+      watchVideoAndInject._t=setTimeout(()=>{
+        watchVideoAndInject._t=0;
+        tryInjectSubtitles();
+        // 视频重建时也重建面板(指向新 <video> 的 textTracks)
+        buildSubtitlePanel();
+      },500);
+    }
+  });
+  mo2.observe(document.body,{childList:true,subtree:true});
+}
+// 字幕 cue 透明背景 + 加阴影避免亮场景看不清
+// 同时覆盖浏览器原生 cue 和 ArtPlayer 自己渲染的字幕层
+(function injectSubCss(){
+  const css=`
+    video::cue, video::-webkit-media-text-track-container, video::-internal-media-controls-overlay-cast-button {background-color:transparent!important;background:none!important;}
+    video::cue {text-shadow:0 0 2px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.7);color:#fff;}
+    .art-subtitle,.art-subtitle-line,.art-subtitle-box{background:transparent!important;background-color:transparent!important;text-shadow:0 0 2px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.7);}
+  `;
+  let s=document.getElementById('__proxy_sub_css');
+  if(!s){s=document.createElement('style');s.id='__proxy_sub_css';document.head.appendChild(s);}
+  s.textContent=css;
+})();
+console.log('[proxy-fallback] subtitle injector installed');
+if(document.body){watchVideoAndInject();}
+else document.addEventListener('DOMContentLoaded',watchVideoAndInject,{once:true});
+})();
+"""
 
 # 首页 HTML 与脚本同目录
 INDEX_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alist_proxy_index.html")
@@ -746,6 +1270,63 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     indexer = DirectoryIndexer(client=client)  # 后台索引,搜索读本地,完全不打上游
     protocol_version = "HTTP/1.1"   # 支持 keep-alive,Range 体验更好
 
+    # 异步后台续签:video_preview 同步重试仍失败时,丢后台线程继续慢慢试,
+    # 把 m3u8 / .ts 缓存填上,后续玩家请求自动恢复(无须手动 reload)。
+    _bg_tasks = set()
+    _bg_tasks_lock = threading.Lock()
+    _BG_REFRESH_INTERVAL = 5     # 间隔秒
+    _BG_REFRESH_MAX = 100        # 最多尝试 100 次 × ~19s = ~30 分钟
+
+    @classmethod
+    def _schedule_bg_refresh(cls, cache_key, alist_path, template_id):
+        with cls._bg_tasks_lock:
+            if cache_key in cls._bg_tasks:
+                return
+            cls._bg_tasks.add(cache_key)
+
+        def worker():
+            try:
+                for i in range(cls._BG_REFRESH_MAX):
+                    time.sleep(cls._BG_REFRESH_INTERVAL)
+                    url, subs = cls.client.get_hls_url(alist_path, template_id)
+                    if url:
+                        cls.hls_cache.put(cache_key, url, subs=subs)
+                        # 拉新 m3u8 内容更新 .ts 缓存
+                        try:
+                            req = urllib.request.Request(url, method="GET")
+                            req.add_header("User-Agent", "Mozilla/5.0 alist-proxy")
+                            with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as upstream:
+                                if upstream.status != 403:
+                                    content = upstream.read().decode("utf-8")
+                                    cls._parse_m3u8_into_cache(content, cache_key, url)
+                                    log.info(f"  bg refresh ok ({i + 1}/{cls._BG_REFRESH_MAX}): {cache_key[:60]}")
+                                    return
+                        except Exception as e:
+                            log.warning(f"  bg m3u8 re-parse failed: {e}")
+                log.warning(f"  bg refresh timed out ({cls._BG_REFRESH_MAX}/{cls._BG_REFRESH_MAX}): {cache_key[:60]}")
+            finally:
+                with cls._bg_tasks_lock:
+                    cls._bg_tasks.discard(cache_key)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @classmethod
+    def _parse_m3u8_into_cache(cls, content, cache_key, m3u8_url):
+        """把 m3u8 内容里的 .ts URL 全部写入 hls_cache(后台续签时复用 _proxy_m3u8 的逻辑)"""
+        m3u8_base = m3u8_url.rsplit("/", 1)[0]
+        m3u8_query = m3u8_url.split("?", 1)[1] if "?" in m3u8_url else ""
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                path_part = stripped.split("?", 1)[0]
+                if path_part.endswith(".ts") or ".ts?" in stripped:
+                    if "?" in stripped:
+                        fname, ts_query = stripped.split("?", 1)
+                    else:
+                        fname, ts_query = stripped, m3u8_query
+                    full_ts_url = f"{m3u8_base}/{fname}?{ts_query}" if ts_query else f"{m3u8_base}/{fname}"
+                    cls.hls_cache.put(f"{cache_key}/{fname}", full_ts_url)
+
     def log_message(self, format, *args):
         log.info(f"{self.client_address[0]} - {format % args}")
 
@@ -815,6 +1396,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if query:
                 sub = sub + "?" + query
             self._handle_hls_proxy(sub)
+            return
+
+        # 字幕代理端点:/__subtitle__/<base64url>
+        # 拉阿里云盘的 .vtt 加 CORS 头,hls.js 才能跨域加载
+        if path == "__subtitle__" or path.startswith("__subtitle__/"):
+            enc = path[len("__subtitle__"):].lstrip("/")
+            try:
+                pad = "=" * (-len(enc) % 4)
+                url = base64.urlsafe_b64decode((enc + pad).encode()).decode()
+            except Exception:
+                self._text(400, "bad subtitle ref\n")
+                return
+            self._proxy_subtitle(url)
             return
 
         # 拦截 /d/<path> 和 /p/<path>(Alist 下载/播放端点)
@@ -963,6 +1557,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 if self.path.startswith("/api/fs/other") and status == 200:
                     data = self._rewrite_fs_other_response(data)
 
+                # 给 HTML 响应注入兜底脚本:小雅页 ArtPlayer 报 NotFound 时自动切到代理 HLS
+                ct = resp_headers.get("Content-Type", "").lower()
+                if "text/html" in ct and not self.path.startswith(("/__api__", "/__hls__")):
+                    data = self._inject_fallback_js(data)
+
                 # 转发响应
                 self.send_response(status)
                 SKIP = {"transfer-encoding", "connection", "keep-alive",
@@ -1073,6 +1672,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             log.warning(f"  改写 fs/other 响应失败: {e}")
             return data
+
+    def _inject_fallback_js(self, data):
+        """把兜底脚本塞进 Alist 返回的 HTML 里,放在 </body> 之前(没有就追加末尾)"""
+        try:
+            html = data.decode("utf-8", errors="ignore")
+        except Exception:
+            return data
+        script_tag = f"<script>{PROXY_FALLBACK_JS}</script>"
+        lower = html.lower()
+        marker = "</body>"
+        idx = lower.rfind(marker)
+        if idx >= 0:
+            html = html[:idx] + script_tag + html[idx:]
+        else:
+            html = html + script_tag
+        return html.encode("utf-8")
 
     # ---------- 视频代理 ----------
     def _handle_proxy(self, rel_path, head_only=False):
@@ -1235,6 +1850,39 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             rewritten.append(line)
                     else:
                         rewritten.append(line)
+
+                # 在 m3u8 顶部注入字幕声明(来自 video_preview API 的 subtitle_task_list)
+                # 阿里云盘转码 m3u8 不带字幕声明,播放器看不到字幕选项
+                subs = self.hls_cache.get_subs(cache_key)
+                if subs:
+                    sub_lines = []
+                    for i, sub in enumerate(subs):
+                        lang = sub.get("language", "")
+                        name = sub.get("name", lang)
+                        sub_url = sub.get("url", "")
+                        if not sub_url:
+                            continue
+                        is_default = "YES" if i == 0 else "NO"
+                        is_autoselect = "YES" if i == 0 else "NO"
+                        # 阿里云盘的 VTT 不带 CORS 头,直接给浏览器会被拒。
+                        # 把 URI 改成走代理,代理拉回来加 CORS 头。
+                        enc = base64.urlsafe_b64encode(sub_url.encode()).decode().rstrip("=")
+                        proxy_uri = f"/__subtitle__/{enc}"
+                        sub_lines.append(
+                            f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="{name}",'
+                            f'DEFAULT={is_default},AUTOSELECT={is_autoselect},FORCED=NO,'
+                            f'LANGUAGE="{lang}",URI="{proxy_uri}"'
+                        )
+                    if sub_lines:
+                        # 字幕声明必须出现在 EXTM3U 之后、第一个 segment 之前
+                        insert_idx = len(rewritten)
+                        for i, line in enumerate(rewritten):
+                            if line.startswith("#EXTINF"):
+                                insert_idx = i
+                                break
+                        rewritten = rewritten[:insert_idx] + sub_lines + rewritten[insert_idx:]
+                        log.info(f"  m3u8 注入字幕: {len(sub_lines)} 条")
+
                 new_content = "\n".join(rewritten).encode("utf-8")
 
                 if silent:

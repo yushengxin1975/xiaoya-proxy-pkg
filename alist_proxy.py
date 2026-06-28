@@ -38,6 +38,13 @@ import collections
 from http import HTTPStatus
 from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: F401  # 保留供将来扩展使用
 
+# 版本号:VERSION 文件是单一来源,运行时通过 _version.py 加载
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    from _version import __version__
+except Exception:
+    __version__ = "0.0.0"
+
 # ============== 配置(从环境变量读取)==============
 # 这些值由 install.sh 写入 ~/.config/alist-proxy/config,
 # systemd 通过 EnvironmentFile 加载。手动运行时直接 export 也可。
@@ -1394,7 +1401,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # 特殊端点
         if path == "__health__":
-            self._text(200, "OK\n")
+            self._text(200, f"OK (v{__version__})\n")
+            return
+
+        if path == "__api__/version":
+            self._text(200, json.dumps({"version": __version__}) + "\n", {"Content-Type": "application/json"})
             return
 
         if path == "__simple__":
@@ -2240,10 +2251,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._text(200, "\n".join(lines) + "\n")
 
     # ---------- 辅助 ----------
-    def _text(self, status, body):
+    def _text(self, status, body, extra_headers=None):
         body_b = body.encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        ct = "text/plain; charset=utf-8"
+        if extra_headers and "Content-Type" in extra_headers:
+            ct = extra_headers["Content-Type"]
+        self.send_header("Content-Type", ct)
         self.send_header("Content-Length", str(len(body_b)))
         self.end_headers()
         try:

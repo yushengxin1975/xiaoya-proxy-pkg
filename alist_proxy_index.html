@@ -486,7 +486,7 @@
   </div>
   <main id="main">加载中…</main>
   <footer>
-    目录浏览本地代理 · 点击视频跳转 Alist 播放 · 全量排序无分页限制
+    目录浏览本地代理 · 点击视频跳转 Alist 播放 · 全量排序无分页限制 · <span id="version-tag">v?</span>
   </footer>
   <div class="tooltip" id="tooltip"></div>
 
@@ -500,6 +500,11 @@
     // 全局搜索状态
     let currentView = "browse";        // "browse" | "search"
     let savedBrowsePath = "/";         // 进入搜索前浏览的路径,退出时恢复
+    // 异步加载版本号显示在 footer
+    fetch('/__api__/version').then(r=>r.json()).then(d=>{
+      const el=document.getElementById('version-tag');
+      if(el&&d&&d.version)el.textContent='v'+d.version;
+    }).catch(()=>{});
     const searchState = {
       keywords: "",
       scope: 0,                         // 0=全部, 1=仅目录, 2=仅文件

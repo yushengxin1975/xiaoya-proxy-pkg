@@ -928,8 +928,8 @@
           const full = el.dataset.full;
           const isdir = el.dataset.isdir === "true";
           if (isdir) {
-            // 进入目录:先退出搜索,再跳转到该目录
-            exitSearch();
+            // 进入目录:先退出搜索模式(跳过恢复原路径,直接走新 hash),再跳转
+            exitSearch(false);
             location.hash = full;
           } else if (isVideo(full)) {
             playInAlist(full);
@@ -949,10 +949,13 @@
       globalSearch(keywords, 1);
     }
 
-    function exitSearch() {
+    function exitSearch(restoreView = true) {
       currentView = "browse";
       $("global-search").value = "";
       $("global-search-clear").style.display = "none";
+      // restoreView=false 用于"从搜索结果跳到目录"的场景:调用者会立刻改 hash,
+      // 此处不要再走一次旧的恢复路由,避免和后面的 hashchange 撞车(竞态导致页面停在旧路径)。
+      if (!restoreView) return;
       // 恢复浏览视图
       if (location.hash.slice(1) !== savedBrowsePath) {
         location.hash = savedBrowsePath;

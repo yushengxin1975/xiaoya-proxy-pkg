@@ -667,33 +667,67 @@ class AlistClient:
         return None
 
     def get_hls_url(self, alist_path, template_id="QHD"):
-        """调用 /api/fs/other method=video_preview,获取指定 template_id 的 m3u8 URL"""
-        r = self.api_post("/api/fs/other", {
-            "path": alist_path,
-            "password": "",
-            "method": "video_preview",
-        })
-        if not r or r.get("code") != 200:
-            log.error(f"获取 HLS URL 失败: {r.get('message') if r else 'no response'}")
-            return None
+        """调用 /api/fs/other method=video_preview,获取指定 template_id 的 m3u8 URL + 字幕列表。
+        失败时按指数退避重试 HLS_RETRY_DELAYS,容忍 Alist 偶发 NotFound.File。
+        返回 (m3u8_url, subs_list),失败时 (None, [])。
+        """
+        last_err = "no response"
+        for attempt in range(len(HLS_RETRY_DELAYS) + 1):
+            if attempt > 0:
+                delay = HLS_RETRY_DELAYS[attempt - 1]
+                log.warning(
+                    f"video_preview 失败({last_err}),{delay}s 后重试 "
+                    f"(attempt {attempt + 1}/{1 + len(HLS_RETRY_DELAYS)})"
+                )
+                time.sleep(delay)
 
-        data = r.get("data") or {}
-        vpi = data.get("video_preview_play_info") or {}
-        task_list = vpi.get("live_transcoding_task_list") or []
+            r = self.api_post("/api/fs/other", {
+                "path": alist_path,
+                "password": "",
+                "method": "video_preview",
+            })
+            if r and r.get("code") == 200:
+                data = r.get("data") or {}
+                vpi = data.get("video_preview_play_info") or {}
+                task_list = vpi.get("live_transcoding_task_list") or []
 
-        # 优先找指定 template_id,找不到就用第一个
-        for task in task_list:
-            if task.get("template_id") == template_id:
-                return task.get("url")
-        if task_list:
-            return task_list[0].get("url")
-        return None
+                # 找指定 template_id 的 m3u8 URL
+                m3u8_url = None
+                for task in task_list:
+                    if task.get("template_id") == template_id:
+                        m3u8_url = task.get("url")
+                        break
+                if not m3u8_url and task_list:
+                    m3u8_url = task_list[0].get("url")
+
+                # 抽字幕列表(完成态才用)
+                subs = []
+                for sub in (vpi.get("live_transcoding_subtitle_task_list") or []):
+                    if sub.get("status") == "finished" and sub.get("url"):
+                        lang = sub.get("language", "") or ""
+                        # 语言代码 → 中文标签
+                        lang_label = {"chi": "中文", "eng": "English", "jpn": "日本語",
+                                      "kor": "한국어", "ind": "Bahasa"}.get(lang, lang.upper())
+                        subs.append({
+                            "language": lang,
+                            "name": lang_label,
+                            "url": sub.get("url"),
+                        })
+
+                if m3u8_url:
+                    return m3u8_url, subs
+                last_err = "响应无 live_transcoding_task_list"
+            else:
+                last_err = (r.get("message") if r else "no response")[:120]
+
+        log.error(f"获取 HLS URL 失败(已重试 {len(HLS_RETRY_DELAYS)} 次): {last_err}")
+        return None, []
 
 
 # ============== URL 缓存 ==============
 class UrlCache:
     def __init__(self):
-        self.cache = {}   # path -> (raw_url, expire_ts)
+        self.cache = {}   # path -> (raw_url, subs_list, expire_ts)
         self.lock = threading.Lock()
 
     def get(self, path):
@@ -702,12 +736,20 @@ class UrlCache:
             entry = self.cache.get(path)
             if not entry:
                 return None, False
-            url, expire = entry
+            url, _subs, expire = entry
             return url, time.time() < expire
 
-    def put(self, path, url):
+    def get_subs(self, path):
+        """返回已存的字幕列表(可能为空)"""
         with self.lock:
-            self.cache[path] = (url, time.time() + URL_CACHE_TTL)
+            entry = self.cache.get(path)
+            if not entry:
+                return []
+            return entry[1] or []
+
+    def put(self, path, url, subs=None):
+        with self.lock:
+            self.cache[path] = (url, subs or [], time.time() + URL_CACHE_TTL)
 
     def invalidate(self, path):
         with self.lock:
@@ -1751,12 +1793,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     alist_path, template_id = cache_key, "QHD"
 
-                m3u8_url = self.client.get_hls_url(alist_path, template_id)
+                m3u8_url, subs = self.client.get_hls_url(alist_path, template_id)
                 if not m3u8_url:
-                    self._text(502, f"无法获取 HLS URL (path={alist_path}, template={template_id})\n")
+                    log.warning(f"  video_preview 同步重试用尽,后台继续尝试: {cache_key[:60]}")
+                    self._schedule_bg_refresh(cache_key, alist_path, template_id)
+                    self._text(502, f"Alist 暂时无法提供 HLS URL,后台续签中 ({alist_path})\n")
                     return
-                self.hls_cache.put(cache_key, m3u8_url)
-                log.info(f"  获取新 HLS URL(缓存至 {URL_CACHE_TTL // 60} 分钟后)")
+                self.hls_cache.put(cache_key, m3u8_url, subs=subs)
+                log.info(f"  获取新 HLS URL(缓存至 {URL_CACHE_TTL // 60} 分钟后),subs={len(subs)}")
 
             if filename.endswith(".m3u8"):
                 ok = self._proxy_m3u8(m3u8_url, cache_key, head_only=head_only)
@@ -1772,10 +1816,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         alist_path, template_id = cache_key.rsplit("__tmpl__", 1)
                     else:
                         alist_path, template_id = cache_key, "QHD"
-                    fresh_m3u8_url = self.client.get_hls_url(alist_path, template_id)
+                    fresh_m3u8_url, fresh_subs = self.client.get_hls_url(alist_path, template_id)
                     if fresh_m3u8_url:
                         m3u8_url = fresh_m3u8_url
-                        self.hls_cache.put(cache_key, m3u8_url)
+                        self.hls_cache.put(cache_key, m3u8_url, subs=fresh_subs)
+                    else:
+                        log.warning(f"  .ts 续签失败,后台继续尝试: {cache_key[:60]}")
+                        self._schedule_bg_refresh(cache_key, alist_path, template_id)
                     # 重新下载 m3u8 内容(静默模式,只更新 .ts 缓存)
                     self._proxy_m3u8(m3u8_url, cache_key, head_only=False, silent=True)
                     ts_url, ts_fresh = self.hls_cache.get(ts_cache_key)
@@ -1912,6 +1959,31 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if not silent:
                 self._text(500, f"m3u8 代理异常: {e}\n")
             return True
+
+    def _proxy_subtitle(self, url):
+        """字幕代理:拉阿里云盘的 .vtt,加 CORS 头,返回给浏览器。
+        阿里云盘返回的 Content-Type 经常是 application/octet-stream,
+        hls.js 需要 text/vtt 才能识别。
+        """
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("User-Agent", "Mozilla/5.0")
+            with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as upstream:
+                data = upstream.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/vtt; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Cache-Control", "public, max-age=600")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            log.warning(f"  字幕代理失败: {e}")
+            try:
+                self._text(502, f"subtitle upstream error: {e}\n")
+            except Exception:
+                pass
 
     def _proxy_to(self, raw_url, alist_path, head_only=False):
         """转发请求到 raw_url。返回 True 表示已处理(无论成功失败),False 表示需要刷新 URL 重试"""

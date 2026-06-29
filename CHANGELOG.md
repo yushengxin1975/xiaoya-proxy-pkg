@@ -2,6 +2,19 @@
 
 所有版本变动记在这里。格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [Unreleased]
+
+### Fixed
+- **Windows install.ps1 在中文 Windows 上崩溃**: UTF-8 脚本无 BOM 被 GBK 控制台破坏解析 → 给脚本加 UTF-8 BOM
+- **Windows install.ps1 在 PS 5.1 `-File` 模式下 "无法识别 Ensure-Nssm 等函数"**: 5.1 不提升后续定义的函数 → 把 `Ensure-Nssm` / `Register-NssmService` / `Register-SchtasksTask` 三个函数定义挪到主逻辑之前
+- **第二次 install 时 `Set-Content : 拒绝访问`**: 首次 install 的 `icacls /grant:r :R` 把 config 收紧到只读,二次 install 无法覆盖 → 改成 `:RW`,并在 Set-Content 前先 icacls /grant 恢复当前用户写权限
+- **`schtasks /delete` 任务不存在时退出码非零触发脚本退出**: 用 `cmd /c "schtasks /delete ... >nul 2>&1"` 吞掉错误
+- **`ValueError: invalid literal for int() with base 10: '"8080"'`**: `alist_proxy.py` 只读环境变量、不读 config 文件;原 wrapper 直接 `set KEY=VALUE` 把 `LISTEN_PORT="8080"` 的引号带进去 → 改用 PowerShell wrapper 解析 config(去掉外层引号)再 export
+
+### Added
+- **非管理员 Windows 用户的安装路径**: NSSM 服务和 `schtasks /create` 都需要管理员,普通用户(Win10/11 默认账户)装不上 → 增加 PowerShell `Register-ScheduledTask` 后备路径(`LogonType=Interactive` + `RunLevel=Limited`),自动检测并降级
+- **`run_proxy.bat` + `run_proxy.ps1` wrapper**: PowerShell 解析 config 设环境变量后再启 python,避免 cmd `for /f` + `^"` 引号剥离的兼容问题
+
 ## [0.2.0] - 2026-06-28
 
 ### Added

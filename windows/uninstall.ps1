@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   卸载 xiaoya-proxy (Windows)。
 .DESCRIPTION
@@ -35,19 +35,31 @@ if (Test-Path $NssmExe) {
     & $NssmExe remove $ServiceName confirm 2>&1 | Out-Null
     Ok "NSSM 服务已移除"
 } else {
-    # 可能装了 schtasks 模式
-    $hasSchtasks = (Get-Command schtasks -ErrorAction SilentlyContinue) -ne $null
-    if ($hasSchtasks) {
-        $exists = & schtasks /query /tn $TaskName 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            & schtasks /end /tn $TaskName 2>&1 | Out-Null
-            & schtasks /delete /tn $TaskName /f 2>&1 | Out-Null
-            Ok "计划任务已删除"
-        } else {
-            Warn "未发现已注册的服务/任务,跳过"
+    # 优先尝试 PowerShell 注册的计划任务(非管理员模式)
+    $psTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($psTask) {
+        try {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+            Ok "PowerShell 计划任务已删除"
+        } catch {
+            Warn "删除计划任务失败: $($_.Exception.Message)"
         }
     } else {
-        Warn "未发现 NSSM 或 schtasks,跳过服务清理"
+        # 否则尝试 schtasks(传统模式)
+        $hasSchtasks = (Get-Command schtasks -ErrorAction SilentlyContinue) -ne $null
+        if ($hasSchtasks) {
+            $exists = & schtasks /query /tn $TaskName 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                & schtasks /end /tn $TaskName 2>&1 | Out-Null
+                & schtasks /delete /tn $TaskName /f 2>&1 | Out-Null
+                Ok "计划任务已删除"
+            } else {
+                Warn "未发现已注册的服务/任务,跳过"
+            }
+        } else {
+            Warn "未发现 NSSM / schtasks / 计划任务,跳过服务清理"
+        }
     }
 }
 

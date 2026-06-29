@@ -14,6 +14,12 @@
 - **小雅页面字幕切换 UI**: 浮动面板 + 透明背景 + 文字阴影,Kodi 风格
 - **`/__api__/version`** 端点返回运行时版本
 - **`/__health__`** 响应附带版本号
+- **Windows 原生安装器** `windows/install.ps1`:
+  - 探测 Python 3.11+ (支持 `python` / `py -3` / `python3` / `py -3.11`)
+  - 默认下载 NSSM 注册为 Windows Service `xiaoya-proxy`
+  - NSSM 不可用时自动降级到 `schtasks onlogon`(无需管理员)
+  - `-NonInteractive` / `-NoStart` / `-ScheduledTask` / `-Port` 参数
+- **Linux 一键升级** `update.sh`:`git pull` + 文件覆盖 + `systemctl restart`,支持 `--dry-run`
 
 ### Fixed
 - 搜索结果里点击目录时的页面竞态(`exitSearch` 双触 `route()` 导致页面停在旧路径),`exitSearch(restoreView)` 新增参数,目录点击传 `false` 跳过恢复路由

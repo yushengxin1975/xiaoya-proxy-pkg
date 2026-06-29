@@ -22,8 +22,8 @@
 
   # 非交互
   $env:ALIST_URL="http://alist:5244"
-  $env:ALIST_USER="dav"
-  $env:ALIST_PASS="xxx"
+  $env:ALIST_USER="your_user"
+  $env:ALIST_PASS="your_pass"
   powershell -ExecutionPolicy Bypass -File install.ps1 -NonInteractive
 
   # 装好不启动

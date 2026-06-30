@@ -162,6 +162,7 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ## 设计说明
 
 - **服务/任务** 默认用 NSSM(NSSM 会把任何 exe 包成标准 Windows Service,支持自动重启、日志轮转)。无管理员权限或不想下载 NSSM 时,加 `-ScheduledTask` 切到 `schtasks onlogon`,功能一样,只是登录后才启动。
+- **ScheduledTask 后备模式** 自动检测 NSSM 失败(NSSM 注册需管理员)后启用:用 PowerShell `Register-ScheduledTask` 注册登录触发任务,任务标记 `Hidden=true`,wrapper 调 `pythonw.exe`(无 console),登录后完全静默运行,无任何窗口闪现。
 - **配置** 写在文件里(权限 600 等价:仅当前用户 R),不写到注册表或服务环境变量里。NSSM 启动时把 config 内容读出来设到进程 env。
 - **更新机制** 沿用 Linux 版:本地有 git 仓库,`git pull` 拿到新代码,`install.ps1` 把新文件覆盖到安装目录 + restart 服务。中断 < 2 秒。
 - **无第三方 Python 依赖** —— 跟 Linux 版一样,只用标准库。NSSM 是独立的 ~600KB exe,不污染 Python 环境。

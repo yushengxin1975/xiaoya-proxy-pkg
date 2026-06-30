@@ -166,6 +166,16 @@ function Register-PowerShellScheduledTask {
     $wrapperBat = Join-Path $BinDir "run_proxy.bat"
     $wrapperPs1 = Join-Path $BinDir "run_proxy.ps1"
     $cfg = $ConfigFile
+    # 优先用 pythonw.exe(无 console,不弹 cmd 窗口);python.org 安装包默认自带
+    # 找不到(eg. 系统 Python 或精简 embed)再降级到 python.exe
+    $runtimeExe = $PythonExe
+    $pythonwExe = $PythonExe -replace '\\python\.exe$', '\pythonw.exe'
+    if ($pythonwExe -ne $PythonExe -and (Test-Path $pythonwExe)) {
+        $runtimeExe = $pythonwExe
+        Ok "使用 pythonw.exe 运行(无控制台窗口)"
+    } else {
+        Warn "pythonw.exe 不存在,降级到 python.exe (会有黑色 cmd 窗口闪现)"
+    }
     $batContent = @"
 @echo off
 REM 由 install.ps1 生成:从 config 读凭据并启动 alist_proxy(用 PowerShell 处理 quoting/特殊字符)
@@ -184,7 +194,7 @@ Get-Content $cfg | ForEach-Object {
 }
 & '__PYEXE__' '__EXE__'
 '@
-    $psContent = $psContent.Replace('__CFG__', $cfg).Replace('__PYEXE__', $PythonExe).Replace('__EXE__', $exe)
+    $psContent = $psContent.Replace('__CFG__', $cfg).Replace('__PYEXE__', $runtimeExe).Replace('__EXE__', $exe)
     # 无 BOM 写 bat 和 ps1(避免 cmd / PowerShell 因 BOM 报错)
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($wrapperBat, $batContent, $utf8NoBom)
@@ -194,6 +204,8 @@ Get-Content $cfg | ForEach-Object {
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    # Hidden=true 让任务计划程序在登录触发时不显示 wrapper 窗口(后台静默运行)
+    $settings.Hidden = $true
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description "Alist reverse proxy with 15-min URL auto-refresh and local indexer" -Force | Out-Null
     Ok "已创建 PowerShell 计划任务: $TaskName (wrapper: $wrapperBat)"
     Start-ScheduledTask -TaskName $TaskName | Out-Null

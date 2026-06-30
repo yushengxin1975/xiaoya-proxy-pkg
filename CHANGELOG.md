@@ -10,6 +10,7 @@
 - **第二次 install 时 `Set-Content : 拒绝访问`**: 首次 install 的 `icacls /grant:r :R` 把 config 收紧到只读,二次 install 无法覆盖 → 改成 `:RW`,并在 Set-Content 前先 icacls /grant 恢复当前用户写权限
 - **`schtasks /delete` 任务不存在时退出码非零触发脚本退出**: 用 `cmd /c "schtasks /delete ... >nul 2>&1"` 吞掉错误
 - **`ValueError: invalid literal for int() with base 10: '"8080"'`**: `alist_proxy.py` 只读环境变量、不读 config 文件;原 wrapper 直接 `set KEY=VALUE` 把 `LISTEN_PORT="8080"` 的引号带进去 → 改用 PowerShell wrapper 解析 config(去掉外层引号)再 export
+- **ScheduledTask 后备模式登录后弹 cmd 窗口**: PowerShell wrapper 跑 `python.exe` 会创建 console,任务计划程序又给 wrapper bat 起一个新 cmd 窗口 → wrapper 改调 `pythonw.exe`(无 console);同时给任务设 `Hidden=true`,任务计划程序登录触发时不再显示 wrapper 窗口
 
 ### Added
 - **非管理员 Windows 用户的安装路径**: NSSM 服务和 `schtasks /create` 都需要管理员,普通用户(Win10/11 默认账户)装不上 → 增加 PowerShell `Register-ScheduledTask` 后备路径(`LogonType=Interactive` + `RunLevel=Limited`),自动检测并降级

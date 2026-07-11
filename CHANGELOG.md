@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-07-11
+
+### Fixed
+- **字幕仍带黑色不透明背景**(0.3.2 的 CSS 覆盖失效):ArtPlayer 用 inline `background-color` 优先级高于外部样式表
+  - 注入更强的 `!important` 样式,同时覆盖更多类名变种(`[class*="art-subtitle"] *`)
+  - 新增 JS 巡检:立即 + 0.2s + 1s + 每 1s 持续 30s,把所有 `[class*="art-subtitle"]` 节点用 `style.setProperty('background','transparent','important')` 强制改 inline,覆盖 ArtPlayer 自己设的内联样式
+
 ## [0.3.7] - 2026-07-11
 
 ### Fixed

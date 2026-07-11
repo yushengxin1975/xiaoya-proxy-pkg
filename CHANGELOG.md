@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-07-11
+
+### Fixed
+- **字幕仍有黑底**(0.3.8 的定时扫与 ArtPlayer 重渲染竞态):ArtPlayer 在字幕更新时会重新渲染 DOM,把刚才改的 inline style 覆盖回去
+  - 改用 `MutationObserver` 监听 DOM `childList` + `attributes`(style/class),任何 `[class*="art-subtitle"]` 节点一出现立即清背景
+  - 覆盖更彻底的 CSS:`html body [class*="art-subtitle"]` + `::cue-region` + WebKit 私有伪元素
+
 ## [0.3.8] - 2026-07-11
 
 ### Fixed

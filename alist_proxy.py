@@ -27,6 +27,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import json
+import re
 import time
 import threading
 import sys
@@ -400,19 +401,86 @@ function tryInjectSubtitles(){
       t.srclang=lang;
       t.src='/__subtitle__/'+enc;
       t.dataset.proxySub='1';
+      t.dataset.source='video_preview';
       if(i===0){t.default=true;}
       v.appendChild(t);
       added++;
     }
-    console.log('[proxy-fallback] 字幕注入',added,'条');
+    console.log('[proxy-fallback] video_preview 字幕注入',added,'条');
     tryAddSubsViaArtPlayer(subs);
-    // 字幕轨已经进了 <video>,画一个浮动切换面板(ArtPlayer 默认不显示多字幕 UI)
-    if(added>0)buildSubtitlePanel();
-    if(added>0){
-      tryInjectSubtitles._donePaths=tryInjectSubtitles._donePaths||{};
-      tryInjectSubtitles._donePaths[p]=true;
+    // 同步拉同目录独立字幕文件(.srt/.ass/.vtt 等),追加到 <video>
+    return loadSiblingSubs(p).then(sibAdded=>{
+      const total=added+sibAdded;
+      // 任意一种字幕加进去就重建切换面板
+      if(total>0)buildSubtitlePanel();
+      if(total>0){
+        tryInjectSubtitles._donePaths=tryInjectSubtitles._donePaths||{};
+        tryInjectSubtitles._donePaths[p]=true;
+      }
+      return total>0;
+    });
+  }).catch(e=>{
+    // LOADING:3s 后再试一次;其它错只打日志不再重试
+    if(e&&e.message==='LOADING'){
+      setTimeout(()=>tryInjectSubtitles(),3000);
+    }else if(e&&/HTTP 5/.test(e.message)){
+      console.log('[proxy-fallback] video_preview 上游 5xx,稍后再试');
+      setTimeout(()=>tryInjectSubtitles(),10000);
+    }else{
+      console.log('[proxy-fallback] 字幕注入结束(本路径):',e&&e.message);
     }
-    return added>0;
+  });
+}
+
+// 简单 SRT → VTT 转换:WEBVTT 头 + 把 00:00:00,000 改成 00:00:00.000
+function srtToVtt(srt){
+  let vtt='WEBVTT\n\n';
+  // SRT 时间戳: HH:MM:SS,mmm → VTT: HH:MM:SS.mmm
+  vtt+=srt.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g,'$1.$2');
+  return vtt;
+}
+
+async function loadSiblingSubs(videoPath){
+  // 拉同目录字幕文件列表(后端 /__api__/sibling_subs 自动匹配 stem)
+  try{
+    const r=await fetch('/__api__/sibling_subs?path='+encodeURIComponent(videoPath));
+    if(!r.ok){console.log('[proxy-fallback] sibling_subs HTTP',r.status);return 0;}
+    const d=await r.json();
+    if(d.code!==200||!Array.isArray(d.data)||d.data.length===0){return 0;}
+    console.log('[proxy-fallback] 同目录字幕候选',d.data.length,'个:',d.data.map(s=>s.name).join(','));
+    const vids=document.querySelectorAll('video');
+    if(vids.length===0)return 0;
+    const v=vids[0];
+    let added=0;
+    for(const sub of d.data){
+      try{
+        const resp=await fetch(sub.url);
+        if(!resp.ok){console.warn('[proxy-fallback] 字幕文件获取失败',sub.name,resp.status);continue;}
+        let text=await resp.text();
+        // SRT → VTT
+        if(sub.format==='srt')text=srtToVtt(text);
+        const blob=new Blob([text],{type:'text/vtt'});
+        const blobUrl=URL.createObjectURL(blob);
+        const t=document.createElement('track');
+        t.kind='subtitles';
+        t.label=(sub.lang&&sub.lang!=='default')?(sub.lang.toUpperCase()+' · '+sub.name):sub.name;
+        t.srclang=sub.lang||'';
+        t.src=blobUrl;
+        t.dataset.proxySub='1';
+        t.dataset.source='sibling';
+        v.appendChild(t);
+        added++;
+      }catch(e){
+        console.warn('[proxy-fallback] 处理同目录字幕失败',sub.name,e);
+      }
+    }
+    console.log('[proxy-fallback] 同目录字幕注入',added,'条');
+    return added;
+  }catch(e){
+    console.warn('[proxy-fallback] loadSiblingSubs 异常',e);
+    return 0;
+  }
+}
   }).catch(e=>{
     // LOADING:3s 后再试一次;其它错只打日志不再重试
     if(e&&e.message==='LOADING'){
@@ -1616,6 +1684,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._handle_api_extra_roots()
             return
 
+        # 同目录字幕文件列表
+        if path == "__api__/sibling_subs":
+            self._handle_api_sibling_subs()
+            return
+
         if path == "__list__" or path.startswith("__list__/"):
             sub = path[len("__list__"):].lstrip("/")
             self._handle_list(sub)
@@ -1652,6 +1725,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._text(400, "bad subtitle ref\n")
                 return
             self._proxy_subtitle(url)
+            return
+
+        # 独立字幕文件代理:/__subtitle_file__/<encoded_alist_path>
+        # 给前端 tryInjectSubtitles 用,加载视频同目录的 .srt/.ass/.vtt 等
+        if path == "__subtitle_file__" or path.startswith("__subtitle_file__/"):
+            sub = path[len("__subtitle_file__"):].lstrip("/")
+            alist_path = "/" + urllib.parse.unquote(sub)
+            self._handle_subtitle_file(alist_path)
             return
 
         # 拦截 /d/<path> 和 /p/<path>(Alist 下载/播放端点)
@@ -2216,6 +2297,143 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._text(502, f"subtitle upstream error: {e}\n")
             except Exception:
                 pass
+
+    def _handle_subtitle_file(self, alist_path):
+        """代理视频同目录下的独立字幕文件(.srt/.ass/.vtt/.ssa/.sub)。
+        复用 _handle_proxy 的 URL 缓存 + 重试逻辑,但响应 Content-Type 按扩展名给,
+        让浏览器拿到后能用 <track> 或直接转 VTT。
+        """
+        ext = alist_path.rsplit(".", 1)[-1].lower() if "." in alist_path else ""
+        CT_MAP = {
+            "srt": "application/x-subrip; charset=utf-8",
+            "vtt": "text/vtt; charset=utf-8",
+            "ass": "text/x-ssa; charset=utf-8",
+            "ssa": "text/x-ssa; charset=utf-8",
+            "sub": "application/x-subrip; charset=utf-8",
+        }
+        for attempt in range(MAX_RETRY_ON_403 + 1):
+            url, is_fresh = self.cache.get(alist_path)
+            if not url or not is_fresh:
+                url = self.client.get_raw_url(alist_path)
+                if not url:
+                    self._text(502, "无法从 Alist 获取字幕文件\n")
+                    return
+                self.cache.put(alist_path, url)
+            try:
+                req = urllib.request.Request(url, method="GET")
+                req.add_header("User-Agent", "Mozilla/5.0 alist-proxy")
+                with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as upstream:
+                    if upstream.status == 403:
+                        self.cache.invalidate(alist_path)
+                        continue
+                    data = upstream.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", CT_MAP.get(ext, "application/octet-stream"))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Cache-Control", "public, max-age=600")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    log.info(f"  字幕文件代理 OK: {alist_path} ({len(data)} bytes, {ext})")
+                    return
+            except urllib.error.HTTPError as e:
+                if e.code == 403:
+                    self.cache.invalidate(alist_path)
+                    continue
+                log.warning(f"  字幕文件 HTTP {e.code}: {alist_path}")
+                self._text(502, f"字幕文件获取失败: HTTP {e.code}\n")
+                return
+            except Exception as e:
+                log.warning(f"  字幕文件代理异常: {e}")
+                self._text(502, f"字幕文件代理异常: {e}\n")
+                return
+        self._text(502, "字幕文件获取失败,已重试\n")
+
+    def _handle_api_sibling_subs(self):
+        """列出视频同目录下的字幕文件(GET /__api__/sibling_subs?path=<video>)。
+
+        匹配规则:同目录、stem 与视频名相同或为其前缀(用于 hero.zh.srt 这类命名),
+        扩展名限 .srt/.vtt/.ass/.ssa/.sub。
+
+        返回 [{name, lang, format, url, size}, ...]
+        """
+        parsed = urllib.parse.urlsplit(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        paths = qs.get("path")
+        if not paths or not paths[0]:
+            self._json(400, {"code": 400, "message": "缺少 path", "data": None})
+            return
+        video_path = paths[0]
+        # 标准化:加前导 /,去掉 query/fragment
+        video_path = video_path.split("?", 1)[0].split("#", 1)[0]
+        if not video_path.startswith("/"):
+            video_path = "/" + video_path
+        while "//" in video_path:
+            video_path = video_path.replace("//", "/")
+
+        parent = video_path.rsplit("/", 1)[0] or "/"
+        stem = video_path.rsplit("/", 1)[-1]
+        # 视频 stem(去掉扩展名)
+        video_stem = re.sub(r"\.[^.]+$", "", stem)
+
+        items = self.client.list_dir(parent)
+        if items is None:
+            self._json(200, {"code": 200, "message": "success", "data": []})
+            return
+
+        SUB_EXTS = (".srt", ".vtt", ".ass", ".ssa", ".sub")
+        LANG_MAP = {
+            # ISO-639-1 短码 → 内部表示
+            "zh": "chi", "chs": "chi", "cht": "chi",
+            "cn": "chi", "chinese": "chi", "中文": "chi", "简体": "chi", "繁体": "chi", "繁體": "chi", "国语": "chi", "國語": "chi",
+            "en": "eng", "eng": "eng", "english": "eng", "英文": "eng", "英语": "eng",
+            "jp": "jpn", "jpn": "jpn", "ja": "jpn", "japanese": "jpn", "日": "jpn", "日语": "jpn", "日語": "jpn",
+            "kr": "kor", "kor": "kor", "ko": "kor", "korean": "kor", "韩语": "kor", "韓語": "kor",
+            "fr": "fra", "french": "fra", "法语": "fra", "法語": "fra",
+            "de": "deu", "german": "deu", "德语": "deu", "德語": "deu",
+            "es": "spa", "spanish": "spa",
+        }
+
+        subs = []
+        for it in items:
+            if it.get("is_dir"):
+                continue
+            name = it.get("name", "")
+            lower = name.lower()
+            matched_ext = None
+            for ext in SUB_EXTS:
+                if lower.endswith(ext):
+                    matched_ext = ext
+                    break
+            if not matched_ext:
+                continue
+            name_stem = name[: -len(matched_ext)]
+            # 严格匹配或 stem.xxx 前缀匹配
+            is_match = False
+            lang_part = ""
+            if name_stem == video_stem:
+                is_match = True
+            elif name_stem.startswith(video_stem + "."):
+                is_match = True
+                lang_part = name_stem[len(video_stem) + 1:].lower()
+            if not is_match:
+                continue
+            lang = LANG_MAP.get(lang_part, lang_part or "default")
+            # 构造代理 URL
+            sub_alist_path = (parent.rstrip("/") + "/" + name) if parent != "/" else ("/" + name)
+            sub_alist_path = sub_alist_path.replace("//", "/")
+            sub_url = "/__subtitle_file__/" + urllib.parse.quote(sub_alist_path.lstrip("/"))
+            subs.append({
+                "name": name,
+                "lang": lang,
+                "format": matched_ext.lstrip("."),
+                "url": sub_url,
+                "size": it.get("size", 0),
+            })
+
+        # 排序:默认(无 lang 后缀)在最前,其余按 lang 字母
+        subs.sort(key=lambda s: (0 if s["lang"] == "default" else 1, s["lang"], s["name"]))
+        self._json(200, {"code": 200, "message": "success", "data": subs})
 
     def _proxy_to(self, raw_url, alist_path, head_only=False):
         """转发请求到 raw_url。返回 True 表示已处理(无论成功失败),False 表示需要刷新 URL 重试"""

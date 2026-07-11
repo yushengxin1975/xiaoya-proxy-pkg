@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-11
+
+### Added
+- **同目录独立字幕自动加载**:播放视频时自动扫描同目录的 `.srt/.ass/.ssa/.vtt/.sub` 文件,匹配与视频同名或 `视频名.语言` 前缀的文件(如 `hero.srt`、`hero.zh.srt`、`hero.eng.ass`),自动加载到 `<track>` 并出现在字幕切换面板里
+  - 后端 `GET /__api__/sibling_subs?path=<video>` 返回候选字幕列表 `{name, lang, format, url, size}`
+  - 后端 `GET /__subtitle_file__/<encoded_path>` 代理下载字幕文件,按扩展名给 Content-Type,加 CORS
+  - 前端 `tryInjectSubtitles()` 加载 video_preview API 字幕后,再异步调 `loadSiblingSubs()` 追加同目录字幕
+  - SRT 文本在前端用 `srtToVtt()` 转成 WebVTT 再喂给 `<track>`;ASS/SSA/VTT 直通
+  - 语言识别支持 ISO-639-1 短码 + 中英文命名(中文、简体、繁体、英文等)
+  - 排序:无语言后缀的(默认)排第一,其后按语言字母
+
 ## [0.3.2] - 2026-07-11
 
 ### Fixed

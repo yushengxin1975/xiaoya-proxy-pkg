@@ -142,6 +142,29 @@
     .item.new .meta::before {
       content: "🆕 ";
     }
+    .item.virtual {
+      border-left: 3px solid #ab47bc;
+      background: rgba(171, 71, 188, 0.06);
+    }
+    .item.virtual .icon { color: #ce93d8; }
+    .item.virtual:hover { border-color: #ce93d8; }
+    .virtual-divider {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 4px 0 8px;
+      font-size: 11px;
+      color: #ab47bc;
+      letter-spacing: .04em;
+    }
+    .virtual-divider::before,
+    .virtual-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(171, 71, 188, 0.35), transparent);
+    }
 
     .empty {
       text-align: center;
@@ -398,6 +421,113 @@
       border: 1px solid rgba(100, 181, 246, 0.35);
     }
 
+    /* 播放历史 */
+    .history-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 12px;
+      background: #1a2129;
+      border: 1px solid #2a3540;
+      border-radius: 6px;
+      transition: all 0.15s;
+      cursor: pointer;
+      margin-bottom: 6px;
+    }
+    .history-item:hover {
+      background: #243040;
+      border-color: #4fc3f7;
+      transform: translateY(-1px);
+    }
+    .history-item .icon {
+      font-size: 20px;
+      width: 28px;
+      text-align: center;
+      flex-shrink: 0;
+      color: #4fc3f7;
+    }
+    .history-item .info { flex: 1; min-width: 0; }
+    .history-item .name {
+      font-size: 13px;
+      color: #e6e6e6;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .history-item .meta {
+      font-size: 11px;
+      color: #777;
+      margin-top: 3px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .history-item .meta .parent-path {
+      color: #4fc3f7;
+      font-family: monospace;
+      font-size: 11px;
+    }
+    .history-item .right-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .history-item .play-count {
+      font-size: 11px;
+      color: #ffa726;
+      padding: 2px 8px;
+      background: rgba(255, 167, 38, 0.1);
+      border: 1px solid rgba(255, 167, 38, 0.3);
+      border-radius: 10px;
+      white-space: nowrap;
+    }
+    .history-item .last-played {
+      font-size: 11px;
+      color: #888;
+      white-space: nowrap;
+    }
+    .history-item .del-btn {
+      background: transparent;
+      border: 0;
+      color: #666;
+      cursor: pointer;
+      font-size: 16px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      line-height: 1;
+    }
+    .history-item .del-btn:hover {
+      background: rgba(244, 67, 54, 0.15);
+      color: #ef5350;
+    }
+    .history-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .history-toolbar .count {
+      font-size: 13px;
+      color: #888;
+    }
+    .history-toolbar .count strong { color: #4fc3f7; }
+    .history-toolbar .clear-btn {
+      padding: 6px 12px;
+      background: rgba(244, 67, 54, 0.08);
+      border: 1px solid rgba(244, 67, 54, 0.3);
+      border-radius: 4px;
+      color: #ef5350;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .history-toolbar .clear-btn:hover { background: rgba(244, 67, 54, 0.18); }
+    .history-toolbar .clear-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
     /* 索引状态横幅 */
     #index-banner {
       display: none;
@@ -465,6 +595,7 @@
         <option value="size-asc">大小 ↑</option>
       </select>
       <button id="toggle-type" title="目录/文件分组">分组</button>
+      <button id="history-btn" title="历史播放记录">📜 历史</button>
     </div>
     <div class="global-search" id="global-search-box">
       <span style="color:#4fc3f7">🔍</span>
@@ -498,7 +629,7 @@
     let currentSort = "date-desc";
     let groupByType = true;
     // 全局搜索状态
-    let currentView = "browse";        // "browse" | "search"
+    let currentView = "browse";        // "browse" | "search" | "history"
     let savedBrowsePath = "/";         // 进入搜索前浏览的路径,退出时恢复
     // 异步加载版本号显示在 footer
     fetch('/__api__/version').then(r=>r.json()).then(d=>{
@@ -555,6 +686,7 @@
       return VIDEO_EXTS.has(name.slice(dot + 1).toLowerCase());
     }
     function iconFor(item) {
+      if (item.__virtual) return "🔗";
       if (item.is_dir) return "📁";
       if (isVideo(item.name)) return "🎬";
       const ext = item.name.split(".").pop().toLowerCase();
@@ -591,6 +723,32 @@
         total = d.data.total || all.length;
         if (d.data.content.length < perPage) break;
         page++;
+      }
+      // 根目录额外追加虚拟挂载点(由后端 EXTRA_ROOT_LINKS 配置驱动),
+      // 让用户的其他 Alist storage(比如个人阿里云盘)在代理根目录可见。
+      // 这些条目不会出现在 Alist 自身的根列表里,仅作为 UI 层跳转入口。
+      if (path === "/" || path === "") {
+        try {
+          const r = await fetch(`${ALIST_BASE}/__api__/extra_roots`);
+          if (r.ok) {
+            const d = await r.json();
+            if (d.code === 200 && Array.isArray(d.data)) {
+              for (const e of d.data) {
+                all.unshift({
+                  name: e.name,
+                  size: 0,
+                  is_dir: true,
+                  modified: "",
+                  path: e.path,
+                  parent: "/",
+                  __virtual: true,
+                });
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("拉取虚拟根目录失败:", e);
+        }
       }
       return all;
     }
@@ -656,20 +814,33 @@
       }
 
       let html = `<div class="item-grid" id="grid">`;
+      let lastWasVirtual = false;
+      let hadVirtual = false;
+      let dividerInserted = false;
       for (const it of sorted) {
-        const full = (path === "/" ? "" : path) + "/" + it.name;
-        const cls = it.is_dir ? "dir" : (isVideo(it.name) ? "video" : "");
-        const newCls = isNew(it) ? " new" : "";
-        const meta = it.is_dir
-          ? "目录"
+        const isVirtual = !!it.__virtual;
+        const full = isVirtual ? it.path : ((path === "/" ? "" : path) + "/" + it.name);
+        const cls = isVirtual
+          ? "dir virtual"
+          : (it.is_dir ? "dir" : (isVideo(it.name) ? "video" : ""));
+        const newCls = (!isVirtual && isNew(it)) ? " new" : "";
+        const meta = (it.is_dir || isVirtual)
+          ? "虚拟挂载 · 跳转 Alist"
           : `${fmtSize(it.size)} · ${fmtDate(it.modified)}`;
         const target = it.is_dir ? `#${full}` : "#";  // 目录跳转,文件由 JS 处理
-        const dataAttrs = it.is_dir ? "" : `data-full="${escapeHtml(full)}"`;
+        const dataAttrs = it.is_dir ? `data-full="${escapeHtml(full)}"` : "";
+        // 在虚拟挂载区和真实目录之间插入分隔线
+        if (lastWasVirtual && !isVirtual && !dividerInserted && hadVirtual) {
+          html += `<div class="virtual-divider">小雅分享库</div>`;
+          dividerInserted = true;
+        }
         html += `<a class="item ${cls}${newCls}" href="${target}" ${dataAttrs}>`;
         html += `<span class="icon">${iconFor(it)}</span>`;
         html += `<span class="info"><div class="name">${escapeHtml(it.name)}</div>`;
         html += `<div class="meta">${meta}</div></span>`;
         html += `</a>`;
+        if (isVirtual) hadVirtual = true;
+        lastWasVirtual = isVirtual;
       }
       html += `</div>`;
       $("main").innerHTML = html;
@@ -702,6 +873,7 @@
       // 代理会把非特殊路径转发到 Alist,返回网页 HTML
       const alistPlayUrl = `${ALIST_BASE}${videoPath}`;
       console.log("跳转 Alist 播放:", alistPlayUrl);
+      recordPlay(videoPath);   // 兜底记录:即便用户拦了弹窗或后端没拦截住,也会留下足迹
       window.open(alistPlayUrl, "_blank");
     }
 
@@ -969,9 +1141,173 @@
       }
     }
 
+    // ============== 播放历史 ==============
+    // 后端在视频流实际命中时已自动记录(见 alist_proxy.py 的 /__stream__ 和 /__hls__),
+    // 这里再补一个"点击即记录"作为兜底:用户点开 Alist 页面但还没拉到 m3u8 / 字节流
+    // 的场景(例如浏览器拦截弹窗)也能留下足迹。
+    function recordPlay(path) {
+      try {
+        fetch(`${ALIST_BASE}/__api__/history/record`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({path}),
+          keepalive: true,   // 页面关了也别丢
+        }).catch(() => {});
+      } catch (e) {}
+    }
+
+    async function enterHistory() {
+      savedBrowsePath = location.hash.slice(1) || "/";
+      currentView = "history";
+      $("global-search").value = "";
+      $("global-search-clear").style.display = "none";
+      $("crumbs").innerHTML = `<span class="current">📜 历史播放</span>`;
+      $("count").textContent = "";
+      $("loading").textContent = "加载历史…";
+      $("main").innerHTML = `<div class="empty">加载中…</div>`;
+      try {
+        const r = await fetch(`${ALIST_BASE}/__api__/history`);
+        const d = await r.json();
+        if (d.code !== 200) throw new Error(d.message || "加载失败");
+        renderHistory(d.data || []);
+      } catch (e) {
+        $("loading").textContent = "";
+        $("main").innerHTML = `<div class="empty">加载失败: ${escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    function renderHistory(entries) {
+      $("loading").textContent = "";
+      let html = `<div class="history-toolbar">
+        <button class="back-btn" id="hist-back-btn" style="padding:6px 12px;background:#2a3540;border:1px solid #3a4550;border-radius:4px;color:#e6e6e6;font-size:13px;cursor:pointer;">← 返回浏览</button>
+        <span class="count">共 <strong>${entries.length}</strong> 条记录 · 最新优先</span>
+        <button class="clear-btn" id="hist-clear-btn" ${entries.length === 0 ? "disabled" : ""}>🗑 清空历史</button>
+      </div>`;
+
+      if (entries.length === 0) {
+        html += `<div class="empty">暂无播放记录<br><br><span style="font-size:12px;color:#888">点击目录里的视频文件即可开始记录</span></div>`;
+      } else {
+        const now = Date.now();
+        for (const e of entries) {
+          const path = e.path || "";
+          const name = e.name || path.rsplit ? path.rsplit("/", 1).pop() : path;
+          const parentDisplay = path.substring(0, path.length - name.length);
+          const lastTs = (e.last_played_at || 0) * 1000;
+          const lastTxt = lastTs > 0 ? fmtRelative(lastTs, now) : "";
+          const count = e.play_count || 1;
+          html += `<div class="history-item" data-full="${escapeHtml(path)}">`;
+          html += `<span class="icon">🎬</span>`;
+          html += `<span class="info">`;
+          html += `<div class="name">${escapeHtml(name)}</div>`;
+          html += `<div class="meta"><span class="parent-path" title="${escapeHtml(path)}">${escapeHtml(parentDisplay || "/")}</span></div>`;
+          html += `</span>`;
+          html += `<span class="right-meta">`;
+          html += `<span class="play-count" title="累计播放次数">▶ ${count}</span>`;
+          html += `<span class="last-played" title="${new Date(lastTs).toLocaleString()}">${escapeHtml(lastTxt)}</span>`;
+          html += `<button class="del-btn" data-del="${escapeHtml(path)}" title="从历史中移除">✕</button>`;
+          html += `</span>`;
+          html += `</div>`;
+        }
+      }
+
+      $("main").innerHTML = html;
+
+      const back = $("hist-back-btn");
+      if (back) back.addEventListener("click", exitHistory);
+      const clr = $("hist-clear-btn");
+      if (clr) clr.addEventListener("click", clearHistory);
+      document.querySelectorAll(".history-item").forEach(el => {
+        el.addEventListener("click", (ev) => {
+          // 点击删除按钮时不要触发播放/跳转
+          if (ev.target.closest(".del-btn")) return;
+          const full = el.dataset.full;
+          if (!full) return;
+          // 视频直接打开 Alist 播放页;非视频走下载(像目录浏览里的逻辑)
+          if (isVideo(full)) {
+            playInAlist(full);
+          } else {
+            window.open(`${ALIST_BASE}/d${full}`, "_blank");
+          }
+        });
+      });
+      document.querySelectorAll(".history-item .del-btn").forEach(btn => {
+        btn.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          const p = btn.dataset.del;
+          if (!p) return;
+          btn.disabled = true;
+          try {
+            await fetch(`${ALIST_BASE}/__api__/history?path=${encodeURIComponent(p)}`, {method: "DELETE"});
+            // 本地也删一下,避免再请求一次列表
+            const item = btn.closest(".history-item");
+            if (item) {
+              item.style.transition = "opacity .2s, transform .2s";
+              item.style.opacity = "0";
+              item.style.transform = "translateX(-12px)";
+              setTimeout(() => {
+                item.remove();
+                const totalEl = document.querySelector(".history-toolbar .count strong");
+                if (totalEl) {
+                  const cur = parseInt(totalEl.textContent || "0", 10) - 1;
+                  totalEl.textContent = cur;
+                  if (cur <= 0) {
+                    const clrBtn = $("hist-clear-btn");
+                    if (clrBtn) clrBtn.disabled = true;
+                    const tb = document.querySelector(".history-toolbar");
+                    if (tb && !$("main").querySelector(".history-item")) {
+                      // 删光了:补一行空状态
+                      const empty = document.createElement("div");
+                      empty.className = "empty";
+                      empty.innerHTML = `暂无播放记录<br><br><span style="font-size:12px;color:#888">点击目录里的视频文件即可开始记录</span>`;
+                      $("main").appendChild(empty);
+                    }
+                  }
+                }
+              }, 200);
+            }
+          } catch (e) {
+            btn.disabled = false;
+            alert("删除失败: " + e.message);
+          }
+        });
+      });
+    }
+
+    async function clearHistory() {
+      if (!confirm("确定清空全部播放历史?此操作不可撤销。")) return;
+      const btn = $("hist-clear-btn");
+      if (btn) btn.disabled = true;
+      try {
+        await fetch(`${ALIST_BASE}/__api__/history/clear`, {method: "POST"});
+        renderHistory([]);
+      } catch (e) {
+        if (btn) btn.disabled = false;
+        alert("清空失败: " + e.message);
+      }
+    }
+
+    function exitHistory() {
+      currentView = "browse";
+      if (location.hash.slice(1) !== savedBrowsePath) {
+        location.hash = savedBrowsePath;
+      } else {
+        route();
+      }
+    }
+
+    function fmtRelative(ts, now) {
+      const diff = Math.max(0, (now - ts) / 1000);
+      if (diff < 60) return "刚刚";
+      if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
+      if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
+      if (diff < 86400 * 7) return Math.floor(diff / 86400) + " 天前";
+      const d = new Date(ts);
+      return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+    }
+
     async function route() {
-      // 搜索模式下不响应 hash 变化(用户在搜索中,不该被路径变化打断)
-      if (currentView === "search") return;
+      // 搜索/历史模式下不响应 hash 变化(用户在子视图里,不该被路径变化打断)
+      if (currentView === "search" || currentView === "history") return;
       const hash = decodeURIComponent(location.hash.slice(1)) || "/";
       savedBrowsePath = hash;
       $("main").innerHTML = "加载中…";
@@ -1211,6 +1547,11 @@
       if (btn) btn.addEventListener("click", () => triggerRebuild(false));
       const btnFull = $("ib-rebuild-full");
       if (btnFull) btnFull.addEventListener("click", () => triggerRebuild(true));
+      const histBtn = $("history-btn");
+      if (histBtn) histBtn.addEventListener("click", () => {
+        if (currentView === "history") exitHistory();
+        else enterHistory();
+      });
     });
   </script>
 </body>

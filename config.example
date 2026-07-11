@@ -22,3 +22,12 @@ LISTEN_HOST=localhost
 
 # 监听端口,默认 8080
 LISTEN_PORT=8080
+
+# ====== 可选:虚拟根目录挂载 ======
+# 把其他 Alist storage 上的路径"虚拟"显示在代理页根目录。
+# 格式:分号分隔多条,每条 "显示名|alist 路径"。例如:
+#   EXTRA_ROOT_LINKS="我的云盘|/my_aliyun;小雅转存|/xiaoya_save"
+# Alist 端把这些 storage 挂到独立子路径(如 /my_aliyun),
+# 代理页根目录会多出几个虚拟文件夹,点击后跳到挂载的真实路径。
+# 留空 = 不启用。
+# EXTRA_ROOT_LINKS=

@@ -4,6 +4,26 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-11
+
+### Added
+- **虚拟根目录挂载点**:通过 `EXTRA_ROOT_LINKS="显示名|/path"` 配置,把 Alist 其他 storage 上的路径在代理页根目录以"🔗"虚拟文件夹的形式露出。Alist 端建议把这些 storage 挂到独立子路径(如 `/my_aliyun`),避免和小雅分享库在 Alist 自身根视图撞车。
+  - 端点:`GET /__api__/extra_roots`
+  - 前端在根目录列表顶部插入虚拟条目 + 一条"小雅分享库"分隔线,点击直接跳到挂载路径
+  - 用途:把个人阿里云盘转存目录、小雅分享库之外的存储等统一汇聚到代理页根
+
+## [0.3.0] - 2026-07-11
+
+### Added
+- **播放历史功能**(代理页"📜 历史"按钮):
+  - 新增 `PlayHistoryStore` 持久化类,存储于 `~/.local/share/alist_proxy/history.json`,上限 200 条
+  - 自动记录触发点:`/__stream__/<path>` 首次 Range 命中 + `/__hls__/<path>/media.m3u8` 命中(seek 时的后续 Range 不重复计数)
+  - 60 秒内同路径去重,再次播放只 +1 计数并刷新时间
+  - 端点:`GET /__api__/history`(列表)、`POST /__api__/history/record`(前端兜底)、`POST /__api__/history/clear`(全清)、`DELETE /__api__/history?path=`(删单条)
+  - 前端面板:列表 + 累计播放次数 + "X 分钟前"相对时间 + 单条删除 + 一键清空 + 点击直达播放
+
+## [Unreleased]
+
 ### Fixed
 - **Windows install.ps1 在中文 Windows 上崩溃**: UTF-8 脚本无 BOM 被 GBK 控制台破坏解析 → 给脚本加 UTF-8 BOM
 - **Windows install.ps1 在 PS 5.1 `-File` 模式下 "无法识别 Ensure-Nssm 等函数"**: 5.1 不提升后续定义的函数 → 把 `Ensure-Nssm` / `Register-NssmService` / `Register-SchtasksTask` 三个函数定义挪到主逻辑之前

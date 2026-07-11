@@ -45,11 +45,46 @@ try:
 except Exception:
     __version__ = "0.0.0"
 
-# ============== 配置(从环境变量读取)==============
+# ============== 配置(从环境变量读取,缺失/被截断时兜底读 config 文件)==============
 # 这些值由 install.sh 写入 ~/.config/alist-proxy/config,
 # systemd 通过 EnvironmentFile 加载。手动运行时直接 export 也可。
+#
+# Windows 下 PowerShell 5.1 通过 env var 传递非 ASCII(emoji/中文)会被
+# GBK 路径弄坏(出现 \ufffd 替换字符)。所以 _env 检测到 env var 含替换字符时,
+# 直接 fallback 到读 UTF-8 config 文件,保留原始字节。
+_CONFIG_FILE = os.path.join(
+    os.environ.get("XIAOYA_PROXY_CONFIG", "").strip()
+    or os.path.expanduser("~/.config/xiaoya-proxy/config")
+)
+
+
+def _read_config(name):
+    """从 ~/.config/xiaoya-proxy/config 读 KEY=VALUE,UTF-8 直读,支持 emoji。
+    找不到返回空串。"""
+    try:
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # 匹配 KEY=VALUE 或 KEY="VALUE"(V 里允许 ; | 等)
+                if line.startswith(name + "="):
+                    val = line[len(name) + 1:].strip()
+                    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+                        val = val[1:-1]
+                    return val
+    except Exception:
+        pass
+    return ""
+
+
 def _env(name, default=""):
     v = os.environ.get(name, "").strip()
+    # env var 含 Unicode 替换字符(PS5.1 等 env var 传递被 GBK 糟蹋)→ 走 config 文件
+    if not v or "\ufffd" in v:
+        cfg_v = _read_config(name)
+        if cfg_v:
+            return cfg_v
     return v if v else default
 
 ALIST_URL    = _env("ALIST_URL",    "http://localhost:5244")
@@ -57,6 +92,14 @@ ALIST_USER   = _env("ALIST_USER",   "")
 ALIST_PASS   = _env("ALIST_PASS",   "")
 LISTEN_HOST  = _env("LISTEN_HOST",  "localhost")    # localhost 比 127.0.0.1 跨域判断更宽松
 LISTEN_PORT  = int(_env("LISTEN_PORT", "8080"))
+
+# 虚拟根目录挂载点:把用户在其他 Alist storage 上的路径"虚拟"显示在代理页根目录。
+# 格式:分号分隔多条,每条 "显示名|alist 路径",例如:
+#   EXTRA_ROOT_LINKS="我的云盘|/my_aliyun;小雅转存|/xiaoya_save"
+# Alist 端建议把这些 storage 挂到独立子路径(/my_aliyun 而不是 /),
+# 避免和小雅分享库(已挂在根)在 Alist 自身根视图上撞车。
+# 这里只是 UI 层把它们提到代理根目录显示,实际数据仍从挂载点读取。
+EXTRA_ROOT_LINKS = _env("EXTRA_ROOT_LINKS", "")
 URL_CACHE_TTL = 14 * 60       # URL 缓存 14 分钟(留 1 分钟缓冲,阿里云盘有效期 15 分钟)
 URL_REFRESH_MARGIN = 60       # 距过期不足 60 秒时认为 URL 即将失效
 MAX_RETRY_ON_403 = 2          # 遇到 403 时最多重试次数
@@ -763,6 +806,117 @@ class UrlCache:
             self.cache.pop(path, None)
 
 
+# ============== 播放历史 ==============
+class PlayHistoryStore:
+    """记录本机视频播放历史,持久化到磁盘,供前端"📜 历史"面板展示。
+
+    触发:代理实际转发视频流时记录(/__stream__/<path> 首次 Range 命中,
+          或 /__hls__/<path>/media.m3u8 命中),而不是用户点链接那一刻——
+          减少"点了没播"的脏数据。
+
+    去重:同路径 DEDUP_SEC 秒内不重复记;再次播放只在原条目上 +1 计数并更新时间。
+
+    存储:JSON 文件 XDG_DATA_HOME/alist_proxy/history.json
+    上限:MAX_ENTRIES 条,超出按 last_played_at 升序淘汰最旧的。
+    """
+
+    HISTORY_PATH = os.path.join(
+        os.environ.get("XDG_DATA_HOME",
+                       os.path.join(os.path.expanduser("~"), ".local", "share")),
+        "alist_proxy", "history.json",
+    )
+    HISTORY_DIR = os.path.dirname(HISTORY_PATH)
+    MAX_ENTRIES = 200
+    DEDUP_SEC = 60
+
+    def __init__(self):
+        self.entries = []   # [{path, name, first_played_at, last_played_at, play_count}]
+        self.lock = threading.Lock()
+        self._load()
+
+    def _load(self):
+        try:
+            os.makedirs(self.HISTORY_DIR, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(self.HISTORY_PATH):
+                with open(self.HISTORY_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    self.entries = [e for e in data if isinstance(e, dict) and e.get("path")]
+        except Exception as e:
+            log.warning(f"加载播放历史失败: {e}")
+
+    def _save(self):
+        try:
+            tmp = self.HISTORY_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.entries, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.HISTORY_PATH)
+        except Exception as e:
+            log.warning(f"保存播放历史失败: {e}")
+
+    @staticmethod
+    def _normalize(path):
+        if not path:
+            return ""
+        # 去掉 query,统一前导 /,折叠重复斜杠
+        p = path.split("?", 1)[0]
+        if not p.startswith("/"):
+            p = "/" + p
+        while "//" in p:
+            p = p.replace("//", "/")
+        # 去掉末尾斜杠(根目录除外)
+        if len(p) > 1 and p.endswith("/"):
+            p = p.rstrip("/")
+        return p
+
+    def record(self, path):
+        """记录一次播放。同路径 DEDUP_SEC 秒内只更新时间戳,不新增计数。"""
+        path = self._normalize(path)
+        if not path or path == "/":
+            return
+        name = path.rsplit("/", 1)[-1] or path
+        now = time.time()
+        with self.lock:
+            for e in self.entries:
+                if e.get("path") == path:
+                    if now - e.get("last_played_at", 0) < self.DEDUP_SEC:
+                        return  # 去重:短时间重复请求(seek/重新加载)
+                    e["last_played_at"] = now
+                    e["play_count"] = int(e.get("play_count", 1)) + 1
+                    self.entries.sort(key=lambda x: x.get("last_played_at", 0), reverse=True)
+                    self._save()
+                    return
+            # 新条目:插到最前
+            self.entries.insert(0, {
+                "path": path,
+                "name": name,
+                "first_played_at": now,
+                "last_played_at": now,
+                "play_count": 1,
+            })
+            if len(self.entries) > self.MAX_ENTRIES:
+                self.entries = self.entries[:self.MAX_ENTRIES]
+            self._save()
+
+    def list(self):
+        with self.lock:
+            return list(self.entries)
+
+    def clear(self):
+        with self.lock:
+            self.entries = []
+            self._save()
+
+    def remove(self, path):
+        path = self._normalize(path)
+        with self.lock:
+            self.entries = [e for e in self.entries if e.get("path") != path]
+            self._save()
+
+
 # ============== 目录索引(后台构建,搜索读本地) ==============
 class DirectoryIndexer:
     """后台线程串行扫描 Alist 目录树,生成可搜索的本地索引。
@@ -1317,6 +1471,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     hls_cache = UrlCache()  # 缓存 HLS 转码 URL,key = alist_path__tmpl__template_id
     search = None  # 保留旧接口以防旧 HTML 引用;实际搜索改走 indexer.search
     indexer = DirectoryIndexer(client=client)  # 后台索引,搜索读本地,完全不打上游
+    history = PlayHistoryStore()  # 视频播放历史(供"📜 历史"面板使用)
     protocol_version = "HTTP/1.1"   # 支持 keep-alive,Range 体验更好
 
     # 异步后台续签:video_preview 同步重试仍失败时,丢后台线程继续慢慢试,
@@ -1426,6 +1581,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._handle_api_index_status()
             return
 
+        # 播放历史:GET 列表 / DELETE 全部;单条删除走 ?path=
+        if path == "__api__/history":
+            parsed_q = urllib.parse.urlsplit(self.path)
+            qs = urllib.parse.parse_qs(parsed_q.query)
+            if qs.get("path"):
+                self.history.remove(qs["path"][0])
+                self._json(200, {"code": 200, "message": "removed", "data": None})
+            else:
+                self._handle_api_history_list()
+            return
+
+        # 虚拟根目录挂载点
+        if path == "__api__/extra_roots":
+            self._handle_api_extra_roots()
+            return
+
         if path == "__list__" or path.startswith("__list__/"):
             sub = path[len("__list__"):].lstrip("/")
             self._handle_list(sub)
@@ -1521,12 +1692,32 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path == "__api__/index/start":
             self._handle_api_index_start()
             return
+        if path == "__api__/history/clear":
+            self.history.clear()
+            self._json(200, {"code": 200, "message": "cleared", "data": None})
+            return
+        if path == "__api__/history/record":
+            self._handle_api_history_record()
+            return
         self._reverse_proxy("POST")
 
     def do_PUT(self):
         self._reverse_proxy("PUT")
 
     def do_DELETE(self):
+        # 单条历史删除走 GET ?path=,这里直接代理给 do_GET 路由处理(简单复用)
+        parsed = urllib.parse.urlsplit(self.path)
+        path = urllib.parse.unquote(parsed.path.strip("/"))
+        if path == "__api__/history":
+            qs = urllib.parse.parse_qs(parsed.query)
+            if qs.get("path"):
+                self.history.remove(qs["path"][0])
+                self._json(200, {"code": 200, "message": "removed", "data": None})
+                return
+            # 不带 path 的 DELETE 也走清空语义,避免 404
+            self.history.clear()
+            self._json(200, {"code": 200, "message": "cleared", "data": None})
+            return
         self._reverse_proxy("DELETE")
 
     # ---------- 反向代理 Alist ----------
@@ -1759,6 +1950,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
             ok = self._proxy_to(url, alist_path, head_only=head_only)
             if ok:
+                # 记录播放:只在首次请求时(无 Range 或 Range bytes=0-),
+                # 避免 seek 时反复 Range 请求造成的重复计数
+                if not head_only:
+                    rng = (self.headers.get("Range") or "").strip()
+                    if not rng or rng.startswith("bytes=0-"):
+                        self.history.record(alist_path)
                 return
 
             # 失败,可能是 URL 过期或网络问题
@@ -1815,6 +2012,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
             if filename.endswith(".m3u8"):
                 ok = self._proxy_m3u8(m3u8_url, cache_key, head_only=head_only)
+                if ok and not head_only:
+                    # m3u8 是播放器启动的第一次请求,记一次播放
+                    alist_path = (cache_key.rsplit("__tmpl__", 1)[0]
+                                  if "__tmpl__" in cache_key else cache_key)
+                    self.history.record(alist_path)
             else:
                 # .ts 文件:从 hls_cache 拿完整 URL(含 query,在 _proxy_m3u8 里缓存)
                 ts_cache_key = f"{cache_key}/{filename}"
@@ -2206,6 +2408,58 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "data": self.indexer.get_status(),
         })
 
+    def _handle_api_history_list(self):
+        """列出播放历史(GET /__api__/history)"""
+        entries = self.history.list()
+        self._json(200, {"code": 200, "message": "success", "data": entries})
+
+    def _handle_api_history_record(self):
+        """前端主动记录一次播放(POST /__api__/history/record,body={path})。
+        大多数情况下由后端在视频流首次命中时自动记录;这里作为前端兜底
+        (例如点开 Alist 页面但还没拉到 m3u8 的场景)。
+        """
+        try:
+            cl = self.headers.get("Content-Length")
+            if not cl or int(cl) == 0:
+                self._json(400, {"code": 400, "message": "缺少请求体", "data": None})
+                return
+            body = self.rfile.read(int(cl))
+            params = json.loads(body) if body else {}
+        except Exception as e:
+            self._json(400, {"code": 400, "message": f"请求体解析失败: {e}", "data": None})
+            return
+        path = (params.get("path") or "").strip()
+        if not path:
+            self._json(400, {"code": 400, "message": "缺少 path", "data": None})
+            return
+        self.history.record(path)
+        self._json(200, {"code": 200, "message": "recorded", "data": None})
+
+    def _handle_api_extra_roots(self):
+        """返回虚拟根目录挂载点列表(GET /__api__/extra_roots)。
+        前端在浏览根目录时把这些条目作为虚拟目录插入到列表顶部。
+        """
+        items = []
+        for raw in (EXTRA_ROOT_LINKS or "").split(";"):
+            raw = raw.strip()
+            if not raw:
+                continue
+            if "|" in raw:
+                name, path = raw.split("|", 1)
+            else:
+                name, path = raw, raw
+            name = name.strip()
+            path = path.strip()
+            if not path:
+                continue
+            if not path.startswith("/"):
+                path = "/" + path
+            # 去掉尾部斜杠(根路径例外)
+            if len(path) > 1 and path.endswith("/"):
+                path = path.rstrip("/")
+            items.append({"name": name or path, "path": path, "virtual": True})
+        self._json(200, {"code": 200, "message": "success", "data": items})
+
     # ---------- 目录浏览(纯文本,保留兼容) ----------
     def _handle_list(self, rel_path):
         alist_path = "/" + rel_path if rel_path else "/"
@@ -2337,6 +2591,8 @@ def main():
     log.info(f"  全局搜索: http://localhost:{port}/__api__/search")
     log.info(f"  索引状态: http://localhost:{port}/__api__/index/status")
     log.info(f"  触发重建: POST http://localhost:{port}/__api__/index/start")
+    log.info(f"  播放历史: http://localhost:{port}/__api__/history")
+    log.info(f"  虚拟根目录: http://localhost:{port}/__api__/extra_roots")
     log.info(f"  健康检查: http://localhost:{port}/__health__")
     log.info(f"  按 Ctrl+C 停止")
     try:

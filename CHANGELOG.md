@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-07-11
+
+### Fixed
+- **历史面板加载失败 `path.rsplit is not a function`**:写历史功能时把 Python 的 `rsplit` 误用到了 JS(JS 里是 `split`)。改成 `path.split("/").pop()`
+
 ## [0.3.6] - 2026-07-11
 
 ### Fixed

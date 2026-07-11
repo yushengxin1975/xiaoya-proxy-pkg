@@ -1191,7 +1191,7 @@
         const now = Date.now();
         for (const e of entries) {
           const path = e.path || "";
-          const name = e.name || path.rsplit ? path.rsplit("/", 1).pop() : path;
+          const name = e.name || (path ? path.split("/").pop() : "");
           const parentDisplay = path.substring(0, path.length - name.length);
           const lastTs = (e.last_played_at || 0) * 1000;
           const lastTxt = lastTs > 0 ? fmtRelative(lastTs, now) : "";

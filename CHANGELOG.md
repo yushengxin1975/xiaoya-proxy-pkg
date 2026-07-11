@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-11
+
+### Fixed
+- **字幕黑色背景遮挡视频**:`injectSubCss` CSS 加强覆盖
+  - `video::cue` 同时清掉 `background-color` 和 `background`,加文字阴影描边
+  - ArtPlayer 字幕容器 + 所有子元素用 `*` 通配 + `background-image:none` 一并清掉,防某些版本给行级盒子套黑底
+  - 仅影响字幕元素,不动 `<video>` 播放控件,不影响视频播放
+
 ## [0.3.1] - 2026-07-11
 
 ### Added

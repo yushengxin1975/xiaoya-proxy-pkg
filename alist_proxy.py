@@ -613,11 +613,30 @@ function watchVideoAndInject(){
 }
 // 字幕 cue 透明背景 + 加阴影避免亮场景看不清
 // 同时覆盖浏览器原生 cue 和 ArtPlayer 自己渲染的字幕层
+// 用 * 选择器覆盖字幕容器的所有子元素,防止某些 ArtPlayer 版本
+// 给行级元素套背景。
 (function injectSubCss(){
   const css=`
-    video::cue, video::-webkit-media-text-track-container, video::-internal-media-controls-overlay-cast-button {background-color:transparent!important;background:none!important;}
-    video::cue {text-shadow:0 0 2px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.7);color:#fff;}
-    .art-subtitle,.art-subtitle-line,.art-subtitle-box{background:transparent!important;background-color:transparent!important;text-shadow:0 0 2px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.7);}
+    /* 浏览器原生 <track> cue — 关掉默认黑底,只保留文字阴影描边 */
+    video::cue {
+      background-color: transparent !important;
+      background: transparent !important;
+      text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7) !important;
+      color: #fff !important;
+    }
+    /* ArtPlayer 字幕层(主容器 + 所有子元素,避免行级盒子的背景) */
+    .art-subtitle, .art-subtitle *,
+    .art-subtitle-line, .art-subtitle-box,
+    .art-subtitle-wrap, .art-subtitle-mask,
+    [class*="art-subtitle"] {
+      background-color: transparent !important;
+      background: transparent !important;
+      background-image: none !important;
+    }
+    .art-subtitle, .art-subtitle-line, .art-subtitle-box {
+      text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7);
+      color: #fff;
+    }
   `;
   let s=document.getElementById('__proxy_sub_css');
   if(!s){s=document.createElement('style');s.id='__proxy_sub_css';document.head.appendChild(s);}

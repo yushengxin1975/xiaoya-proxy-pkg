@@ -481,18 +481,6 @@ async function loadSiblingSubs(videoPath){
     return 0;
   }
 }
-  }).catch(e=>{
-    // LOADING:3s 后再试一次;其它错只打日志不再重试
-    if(e&&e.message==='LOADING'){
-      setTimeout(()=>tryInjectSubtitles(),3000);
-    }else if(e&&/HTTP 5/.test(e.message)){
-      console.log('[proxy-fallback] video_preview 上游 5xx,稍后再试');
-      setTimeout(()=>tryInjectSubtitles(),10000);
-    }else{
-      console.log('[proxy-fallback] 字幕注入结束(本路径):',e&&e.message);
-    }
-  });
-}
 
 function tryAddSubsViaArtPlayer(subs){
   const finished=subs.filter(s=>s&&s.status==='finished'&&s.url);
@@ -500,7 +488,7 @@ function tryAddSubsViaArtPlayer(subs){
   const candidates=[
     ()=>window.art,
     ()=>window.AP&&window.AP.instance,
-    ()=>document.querySelector('.art-video-player')?.__art,
+    ()=>{var e=document.querySelector('.art-video-player');return e&&e.__art;},
   ];
   for(const get of candidates){
     try{

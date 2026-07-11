@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-11
+
+### Fixed
+- **点击视频没反应**(PROXY_FALLBACK_JS 注入到 Alist 页面后整个 IIFE 解析失败)
+  - 移除 `loadSiblingSubs` 函数结尾残留的 stray `.catch(e=>{...});` 重复代码块(0.3.3 编辑时遗留)
+  - 把 ES2020 可选链 `?.` 改成 ES5 兼容写法,老旧解析器/引擎也能跑
+  - JS 用 esprima 4 全量解析通过,确认无其他语法错误
+
 ## [0.3.3] - 2026-07-11
 
 ### Added

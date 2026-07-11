@@ -828,7 +828,8 @@
           ? "虚拟挂载 · 跳转 Alist"
           : `${fmtSize(it.size)} · ${fmtDate(it.modified)}`;
         const target = it.is_dir ? `#${full}` : "#";  // 目录跳转,文件由 JS 处理
-        const dataAttrs = it.is_dir ? `data-full="${escapeHtml(full)}"` : "";
+        // data-full 给文件用(点击 → JS 处理播放/下载)。目录 href 已是 #${full},不重复
+        const dataAttrs = it.is_dir ? "" : `data-full="${escapeHtml(full)}"`;
         // 在虚拟挂载区和真实目录之间插入分隔线
         if (lastWasVirtual && !isVirtual && !dividerInserted && hadVirtual) {
           html += `<div class="virtual-divider">小雅分享库</div>`;

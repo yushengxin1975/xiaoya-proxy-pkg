@@ -468,6 +468,7 @@ async function loadSiblingSubs(videoPath){
         t.src=blobUrl;
         t.dataset.proxySub='1';
         t.dataset.source='sibling';
+        t.dataset.proxyUrl=sub.url;  // 保留原始代理 URL,给 ArtPlayer.subtitle.switch 用
         v.appendChild(t);
         added++;
       }catch(e){
@@ -598,6 +599,11 @@ function buildSubtitlePanel(){
     }
     const offBtn=makeItem('关闭字幕',()=>{
       for(const t of v.textTracks)t.mode='hidden';
+      try{
+        const arts=[window.art,(window.AP&&window.AP.instance),document.querySelector('.art-video-player')&&document.querySelector('.art-video-player').__art];
+        const art=arts.find(Boolean);
+        if(art&&art.subtitle&&typeof art.subtitle.switch==='function')art.subtitle.switch({url:'',type:''});
+      }catch(e){}
     },true);
     offBtn.dataset.kind='off';
 
@@ -611,6 +617,20 @@ function buildSubtitlePanel(){
       const btn=makeItem('▶ '+lbl,()=>{
         for(const x of v.textTracks)x.mode='hidden';
         t.mode='showing';
+        // HLS / ArtPlayer 不读 <track>,另调 subtitle.switch 让 hls.js 接管字幕轨
+        try{
+          const arts=[window.art,(window.AP&&window.AP.instance),document.querySelector('.art-video-player')&&document.querySelector('.art-video-player').__art];
+          const art=arts.find(Boolean);
+          if(art){
+            const proxyUrl=t.dataset.proxyUrl;  // sibling 字幕保留原始代理 URL
+            const vttUrl=t.dataset.source==='sibling'?(proxyUrl||t.src):t.src;
+            if(art.subtitle&&typeof art.subtitle.switch==='function'){
+              art.subtitle.switch({url:vttUrl,type:'vtt',name:lbl,lang:lang});
+            }else if(typeof art.addTrack==='function'){
+              art.addTrack({url:vttUrl,type:'SUBTITLES',lang:lang,name:lbl,default:true});
+            }
+          }
+        }catch(e){console.warn('[proxy-fallback] ArtPlayer.subtitle.switch 失败',e);}
       });
       btn.dataset.kind='track';
       btn.dataset.idx=idx;

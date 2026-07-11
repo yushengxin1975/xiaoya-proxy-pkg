@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-07-11
+
+### Fixed
+- **HLS 视频选中同目录字幕后字幕不显示**:`<track>` 元素能被浏览器枚举到(所以面板能列出),但 hls.js 实际渲染字幕时不读 `<track>`,只读它自己从 m3u8 拿到的字幕轨。点面板时除了 `textTracks.mode='showing'`,现在还调 `art.subtitle.switch({url,type:'vtt',lang,name})`,让 ArtPlayer/hls.js 接管
+  - 关闭字幕按钮也调 `art.subtitle.switch({url:'',type:''})` 取消 ArtPlayer 端的字幕轨
+
 ## [0.3.5] - 2026-07-11
 
 ### Fixed

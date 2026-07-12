@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.3.18] - 2026-07-11
+
+### Fixed
+- **视频播到 ~14 分钟 502 黑屏**(阿里云盘签名 URL TTL=15 分钟,代理 `URL_CACHE_TTL=14` 分钟,玩家第 15 分钟 .ts 请求签名过期,Alist 偶尔 `/api/fs/other` 返 5xx,bg 续签跑空):
+  - **激进预刷新**:在 `_proxy_m3u8` 成功后检查 `hls_cache.expire_ts(cache_key)` 剩余时间;< 3 分钟就 schedule bg 续签,bg 跑到 14 分钟时缓存已就绪
+  - **`HLS_RETRY_DELAYS` 扩大**:`(2, 4, 8)` → `(2, 4, 8, 16, 30)`,共 ~60s 容忍 Alist 偶尔抽风
+  - **`_BG_REFRESH_INTERVAL` 加快**:5s → 3s,bg 续签节奏紧凑
+  - **所有 502 加 `Retry-After: 3`**:浏览器自动每 3s 重试一次,bg 拿到新 m3u8 后用户无感知
+
 ## [0.3.16] - 2026-07-11
 
 ### Fixed

@@ -143,7 +143,7 @@ URL_REFRESH_MARGIN = 60       # 距过期不足 60 秒时认为 URL 即将失效
 MAX_RETRY_ON_403 = 2          # 遇到 403 时最多重试次数
 UPSTREAM_TIMEOUT = 30         # 上游请求超时(秒)
 CHUNK_SIZE = 64 * 1024        # 流式转发块大小
-HLS_RETRY_DELAYS = (2, 4, 8)   # video_preview 失败后等待秒数;总尝试 = 1 + len(delays) = 4 次
+HLS_RETRY_DELAYS = (2, 4, 8, 16, 30)  # video_preview 失败后等待秒数;总尝试 1+len(delays)=6 次,共 ~60s
 
 # 小雅魔改版 Alist 页面里塞的兜底脚本:阿里云盘 auto-save 被审/删后,
 # 页面会显示 "NotFound.File: ... cannot be found" 文案。这段 JS 用
@@ -1064,6 +1064,14 @@ class UrlCache:
                 return []
             return entry[1] or []
 
+    def expire_ts(self, path):
+        """返回缓存条目的 expire 时间戳(用于预刷新判断)。未命中返回 0"""
+        with self.lock:
+            entry = self.cache.get(path)
+            if not entry:
+                return 0
+            return entry[2]
+
     def put(self, path, url, subs=None):
         with self.lock:
             self.cache[path] = (url, subs or [], time.time() + URL_CACHE_TTL)
@@ -1745,7 +1753,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     # 把 m3u8 / .ts 缓存填上,后续玩家请求自动恢复(无须手动 reload)。
     _bg_tasks = set()
     _bg_tasks_lock = threading.Lock()
-    _BG_REFRESH_INTERVAL = 5     # 间隔秒
+    _BG_REFRESH_INTERVAL = 3     # 间隔秒(激进预刷新后,bg 续签节奏加快)
     _BG_REFRESH_MAX = 100        # 最多尝试 100 次 × ~19s = ~30 分钟
 
     @classmethod
@@ -2439,6 +2447,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     except BrokenPipeError:
                         pass
                 log.info(f"  m3u8 改写完成({len(new_content)} 字节)")
+                # === 激进预刷新:检测 m3u8 缓存年龄,临近过期(<3 分钟)时主动 schedule bg 续签 ===
+                # 这样下一次 .ts 请求时缓存已更新,避免 56:59 这种 502 黑屏
+                try:
+                    expire_at = self.hls_cache.expire_ts(cache_key)
+                    if expire_at > 0:
+                        remaining = expire_at - time.time()
+                        if 0 < remaining < 180:  # 不到 3 分钟就过期
+                            if "__tmpl__" in cache_key:
+                                ap_, tp_ = cache_key.rsplit("__tmpl__", 1)
+                            else:
+                                ap_, tp_ = cache_key, "QHD"
+                            log.info(f"  m3u8 缓存剩余 {remaining:.0f}s,提前 schedule bg 续签: {cache_key[:50]}")
+                            self._schedule_bg_refresh(cache_key, ap_, tp_)
+                except Exception as e:
+                    log.debug(f"  pre-refresh 调度失败(忽略): {e}")
                 return True
         except urllib.error.HTTPError as e:
             if e.code == 403:
@@ -2958,6 +2981,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             ct = extra_headers["Content-Type"]
         self.send_header("Content-Type", ct)
         self.send_header("Content-Length", str(len(body_b)))
+        # 502 让浏览器/bg 续签时自动短暂重试
+        if status == 502:
+            self.send_header("Retry-After", "3")
         self.end_headers()
         try:
             self.wfile.write(body_b)

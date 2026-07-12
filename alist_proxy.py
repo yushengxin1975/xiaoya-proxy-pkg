@@ -738,6 +738,31 @@ function watchVideoAndInject(){
 function setupCustomSubtitleRenderer(){
   if(setupCustomSubtitleRenderer._installed)return;
   setupCustomSubtitleRenderer._installed=true;
+  // 修复进度条 inline background 拍透明:周期性 removeProperty 把 inline 的
+  // background-color / background-image / background 三个属性清掉,回退到
+  // ArtPlayer CSS 默认颜色。同时设保险用的 explicit 色作为兜底。
+  const PBAR_PROTECT = `
+    .art-progress-loaded  { background-color: rgba(255,255,255,0.35) !important; }
+    .art-progress-played  { background-color: #4fc3f7 !important; }
+    .art-progress-indicator { background-color: #fff !important; border-color: #4fc3f7 !important; }
+  `;
+  let pbs = document.getElementById('__proxy_pbar_css');
+  if(!pbs){pbs=document.createElement('style');pbs.id='__proxy_pbar_css';document.head.appendChild(pbs);}
+  pbs.textContent = PBAR_PROTECT;
+  function fixProgressBar(){
+    // 删 inline background 三个属性(让 ArtPlayer CSS 默认色生效)
+    for(const sel of ['.art-progress-loaded','.art-progress-played','.art-progress-indicator']){
+      const el = document.querySelector(sel);
+      if(!el) continue;
+      try{
+        el.style.removeProperty('background');
+        el.style.removeProperty('background-color');
+        el.style.removeProperty('background-image');
+      }catch(e){}
+    }
+  }
+  fixProgressBar();
+  setInterval(fixProgressBar, 2000);
   function ensureOverlay(){
     let o=document.getElementById('__proxy_subtitle_overlay__');
     if(o)return o;
@@ -806,9 +831,13 @@ function setupCustomSubtitleRenderer(){
       text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7) !important;
       color: #fff !important;
     }
-    /* ArtPlayer 字幕 DOM — 用 html body 前缀顶 specificity */
-    html body [class*="art-subtitle"],
-    html body [class*="art-subtitle"] * {
+    /* ArtPlayer 字幕 DOM — 用 .art-subtitle 精确类匹配,避免误伤 .art-subtitle-show /
+       .art-subtitle-set 等含子串的兄弟元素(.art-subtitle-show 在播放器根上,
+       通配会把 .art-video-player / .art-bottom / .art-progress 全拍透明导致进度条隐形) */
+    html body .art-subtitle,
+    html body .art-subtitle-line,
+    html body .art-subtitle-text,
+    html body .art-subtitle-shade {
       background: transparent !important;
       background-color: transparent !important;
       background-image: none !important;
@@ -828,7 +857,8 @@ function setupCustomSubtitleRenderer(){
     }catch(e){}
   }
   function stripAllArtSubtitle(){
-    document.querySelectorAll('[class*="art-subtitle"]').forEach(el=>{
+    // 精确类名匹配 — 避免误伤 .art-subtitle-show / .art-subtitle-set 等
+    document.querySelectorAll('.art-subtitle, .art-subtitle-line, .art-subtitle-text, .art-subtitle-shade').forEach(el=>{
       stripInlineBg(el);
       try{el.querySelectorAll('*').forEach(stripInlineBg);}catch(e){}
     });
@@ -848,7 +878,7 @@ function setupCustomSubtitleRenderer(){
           if(/art-subtitle/i.test(n.className||''))stripInlineBg(n);
           if(n.querySelectorAll){
             try{
-              n.querySelectorAll('[class*="art-subtitle"]').forEach(stripInlineBg);
+              n.querySelectorAll('.art-subtitle, .art-subtitle-line, .art-subtitle-text, .art-subtitle-shade').forEach(stripInlineBg);
             }catch(e){}
           }
         }

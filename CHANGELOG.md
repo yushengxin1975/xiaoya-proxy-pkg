@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-07-11
+
+### Fixed
+- **进度条被拍透明**(0.3.15 仍残留):`.art-progress-loaded`/`.art-progress-played`/`.art-progress-indicator` 的 inline style 有 `background: none transparent !important`,加上文字阴影 cover,导致进度条视觉上消失。修复:
+  - 注入 `<style id=__proxy_pbar_css>`,显式给三个子元素设置 `background-color`(半透明白 / 蓝 / 白)
+  - `setInterval(2s)` 调 `el.style.removeProperty('background')` 把后写的 inline 清掉,让 CSS 默认色生效
+
+## [0.3.15] - 2026-07-11
+
+### Fixed
+- 修复自定义字幕 overlay 把进度条挡住:从 `[class*="art-subtitle"]` 通配改成精确 `.art-subtitle` / `.art-subtitle-line` 等,避免误伤 `.art-subtitle-show` 等含子串的兄弟类
+
 ## [0.3.14] - 2026-07-11
 
 ### Fixed

@@ -88,6 +88,43 @@ def _env(name, default=""):
             return cfg_v
     return v if v else default
 
+
+# WebVTT 注入:在文本顶部插 STYLE 块强制 ::cue/::cue-region 透明背景。
+# WebVTT v3 标准样式块,Chrome/Edge/Firefox 都支持。浏览器读入后,原生
+# <track> 渲染的字幕不再有黑底。
+_VTT_STYLE_BLOCK = (
+    "STYLE\n"
+    "::cue { background: transparent !important; color: #fff; "
+    "text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7); }\n"
+    "::cue-region { background-color: transparent !important; }\n"
+)
+
+
+def inject_vtt_style(text):
+    """在 WebVTT 文本顶部注入 STYLE 块,使浏览器原生 <track> 渲染时透明。
+
+    如果原文本不以 'WEBVTT' 开头(比如某些损坏的源),也补一个 WEBVTT 头。
+    重复调用幂等:已经注入了 STYLE 块就不再加。
+    """
+    if not text:
+        return "WEBVTT\n\n" + _VTT_STYLE_BLOCK
+    text = text.lstrip("\ufeff").lstrip()  # 去 BOM + 前后空白
+    if "PROXY-VTT-STYLE" in text:
+        # 已经注入过了,直接返回(幂等)
+        return text
+    if not text.startswith("WEBVTT"):
+        # 不是合法 WebVTT,补完整头部
+        return "WEBVTT\nPROXY-VTT-STYLE\n\n" + _VTT_STYLE_BLOCK + text
+    # 在 WEBVTT 头后插入 STYLE 块
+    head_end = text.find("\n")
+    if head_end < 0:
+        return text + "\n\n" + _VTT_STYLE_BLOCK
+    head = text[: head_end + 1]  # 含换行
+    body = text[head_end + 1 :]
+    # body 以 \n\n 或 NOTE/STYLE/REGION 开头,直接插在最前
+    return head + "PROXY-VTT-STYLE\n\n" + _VTT_STYLE_BLOCK + body
+
+
 ALIST_URL    = _env("ALIST_URL",    "http://localhost:5244")
 ALIST_USER   = _env("ALIST_USER",   "")
 ALIST_PASS   = _env("ALIST_PASS",   "")
@@ -434,7 +471,13 @@ function tryInjectSubtitles(){
 
 // 简单 SRT → VTT 转换:WEBVTT 头 + 把 00:00:00,000 改成 00:00:00.000
 function srtToVtt(srt){
-  let vtt='WEBVTT\n\n';
+  // SRT → WebVTT 转换:补 WEBVTT 头 + STYLE 块(::cue 透明)
+  let vtt='WEBVTT\n\n'
+    +'PROXY-SRT-STYLE\n\n'
+    +'STYLE\n'
+    +'::cue { background: transparent !important; color: #fff; '
+      +'text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7); }\n'
+    +'::cue-region { background-color: transparent !important; }\n\n';
   // SRT 时间戳: HH:MM:SS,mmm → VTT: HH:MM:SS.mmm
   vtt+=srt.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g,'$1.$2');
   return vtt;
@@ -2285,20 +2328,29 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """字幕代理:拉阿里云盘的 .vtt,加 CORS 头,返回给浏览器。
         阿里云盘返回的 Content-Type 经常是 application/octet-stream,
         hls.js 需要 text/vtt 才能识别。
+
+        在 WebVTT 顶部注入 STYLE 块(标准 v3),把 ::cue/::cue-region 背景
+        设为透明 — 浏览器原生 <track> 渲染时不再带黑底。
         """
         try:
             req = urllib.request.Request(url)
             req.add_header("User-Agent", "Mozilla/5.0")
             with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as upstream:
-                data = upstream.read()
+                raw = upstream.read()
+            # 阿里云盘有时给 application/octet-stream,假定为 WebVTT 文本处理
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("utf-8", errors="replace")
+            out = inject_vtt_style(text).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/vtt; charset=utf-8")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
             self.send_header("Cache-Control", "public, max-age=600")
-            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Length", str(len(out)))
             self.end_headers()
-            self.wfile.write(data)
+            self.wfile.write(out)
         except Exception as e:
             log.warning(f"  字幕代理失败: {e}")
             try:
@@ -2310,6 +2362,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """代理视频同目录下的独立字幕文件(.srt/.ass/.vtt/.ssa/.sub)。
         复用 _handle_proxy 的 URL 缓存 + 重试逻辑,但响应 Content-Type 按扩展名给,
         让浏览器拿到后能用 <track> 或直接转 VTT。
+
+        .vtt / .ass 文件:在 WebVTT 文本顶部注 STYLE 块(::cue 透明背景),
+        使浏览器原生 <track> 渲染时不再带黑底。
         """
         ext = alist_path.rsplit(".", 1)[-1].lower() if "." in alist_path else ""
         CT_MAP = {
@@ -2334,15 +2389,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     if upstream.status == 403:
                         self.cache.invalidate(alist_path)
                         continue
-                    data = upstream.read()
+                    raw = upstream.read()
+                    # 仅文本类字幕注入 STYLE 块;SRT/SUB 留给前端转换
+                    if ext in ("vtt", "ass", "ssa"):
+                        try:
+                            text = raw.decode("utf-8")
+                        except UnicodeDecodeError:
+                            text = raw.decode("utf-8", errors="replace")
+                        out = inject_vtt_style(text).encode("utf-8")
+                    else:
+                        out = raw
                     self.send_response(200)
                     self.send_header("Content-Type", CT_MAP.get(ext, "application/octet-stream"))
                     self.send_header("Access-Control-Allow-Origin", "*")
                     self.send_header("Cache-Control", "public, max-age=600")
-                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Length", str(len(out)))
                     self.end_headers()
-                    self.wfile.write(data)
-                    log.info(f"  字幕文件代理 OK: {alist_path} ({len(data)} bytes, {ext})")
+                    self.wfile.write(out)
+                    log.info(f"  字幕文件代理 OK: {alist_path} ({len(out)} bytes, {ext})")
                     return
             except urllib.error.HTTPError as e:
                 if e.code == 403:

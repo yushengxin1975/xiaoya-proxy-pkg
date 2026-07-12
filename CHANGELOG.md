@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-07-11
+
+### Added
+- **服务端 WebVTT `STYLE` 块注入**(字幕透明背景):`_proxy_subtitle`(转码字幕)和 `_handle_subtitle_file`(.vtt/.ass/.ssa)从上游拿到字幕内容后,在 WEBVTT 头后插入:
+  ```
+  STYLE
+  ::cue { background: transparent !important; color: #fff; text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7); }
+  ::cue-region { background-color: transparent !important; }
+  ```
+  让浏览器原生 `<track>` 渲染时直接透明。WebVTT v3 标准,Chrome/Edge/Firefox 都支持。**纯服务端改,不动上游小雅。**
+
+- 前端 `srtToVtt()` 也补上同样的 STYLE 块,处理外置 `.srt` 转 WebVTT 路径。
+
+### Reverted
+- 0.3.8 / 0.3.9 字幕透明背景相关改动(MutationObserver / setProperty important 覆盖,失败且搞乱注入脚本,回滚)
+
 ## [0.3.7] - 2026-07-11
 
 ### Fixed

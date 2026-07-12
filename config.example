@@ -31,16 +31,3 @@ LISTEN_PORT=8080
 # 代理页根目录会多出几个虚拟文件夹,点击后跳到挂载的真实路径。
 # 留空 = 不启用。
 # EXTRA_ROOT_LINKS=
-
-# ====== 可选:本地 .ts 段缓存(防阿里云盘风控导致播放中断)======
-# 播放视频时,代理把每个 .ts 段顺手存到本地磁盘。
-# 若某段 upstream 拉不到(403/404/超时 — 比如风控后资源被删),
-# 代理自动回退到本地已缓存的版本,玩家无感。
-#
-# LOCAL_CACHE_ENABLED - true/false,默认 true
-# LOCAL_CACHE_DIR - 缓存根目录,默认 ~/.cache/alist_proxy/ts_segments/
-# LOCAL_CACHE_MAX_GB - 容量上限(超出会按 mtime 淘汰最旧),默认 200 GB
-#
-# LOCAL_CACHE_ENABLED=true
-# LOCAL_CACHE_DIR=
-# LOCAL_CACHE_MAX_GB=200

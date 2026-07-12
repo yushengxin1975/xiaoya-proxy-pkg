@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.3.19] - 2026-07-11
+
+### Fixed
+- **Edge Tracking Prevention 拦截 jsDelivr CDN 阻止 hls.js 访问 storage**(报错 "Tracking Prevention blocked access to storage for cdn.jsdelivr.net"):
+  - 代理新增 `/_static_/hls.min.js` 端点,首启动时从 jsDelivr 拉一次缓存到 `~/.local/share/alist_proxy/hls.min.js`,后续启动直接读本地磁盘,完全脱离外网依赖
+  - `PROXY_FALLBACK_JS.loadHlsJs` 加载顺序:本地优先,再尝试 jsDelivr + cdnjs 作 fallback
+  - 上 Aliyundrive 上小雅转存视频被清理导致 `video_preview` 返 `object not found` 的情况,这个修复同样无效(视频不在了,任何代理层修复都解决不了)
+
 ## [0.3.18] - 2026-07-11
 
 ### Fixed

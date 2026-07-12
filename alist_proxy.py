@@ -145,6 +145,59 @@ UPSTREAM_TIMEOUT = 30         # 上游请求超时(秒)
 CHUNK_SIZE = 64 * 1024        # 流式转发块大小
 HLS_RETRY_DELAYS = (2, 4, 8, 16, 30)  # video_preview 失败后等待秒数;总尝试 1+len(delays)=6 次,共 ~60s
 
+# hls.js 代理:首次请求从 CDN 拉,缓存到本地磁盘(XDG_DATA_HOME),之后永远由代理自己 host。
+# 避免浏览器跨站跟踪防护(cdn.jsdelivr.net)拦截 + 完全摆脱外网依赖。
+_HLS_JS_FILENAME = "hls.min.js"
+def _hls_js_path():
+    p = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+    return os.path.join(p, "alist_proxy", _HLS_JS_FILENAME)
+
+
+_HLS_JS_BYTES = None  # 启动时尝试加载
+
+
+def _ensure_hls_js():
+    """确保 hls.min.js 在磁盘。第一次调用会从 CDN 拉(40~100s 后超时)"""
+    global _HLS_JS_BYTES
+    p = _hls_js_path()
+    if os.path.isfile(p) and os.path.getsize(p) > 1000:
+        if _HLS_JS_BYTES is None:
+            try:
+                with open(p, "rb") as f:
+                    _HLS_JS_BYTES = f.read()
+                log.info(f"  加载本地 hls.min.js: {len(_HLS_JS_BYTES)//1024}KB ({p})")
+            except Exception as e:
+                log.warning(f"  读本地 hls.min.js 失败: {e}")
+                return None
+        return _HLS_JS_BYTES
+    # 需要下载
+    cdn = "https://cdn.jsdelivr.net/npm/hls.js@1.5.13"
+    log.info(f"  首次启动:从 {cdn} 下载 hls.js...")
+    try:
+        req = urllib.request.Request(cdn, headers={"User-Agent": "Mozilla/5.0"})
+        data = urllib.request.urlopen(req, timeout=60).read()
+        if not data or len(data) < 1000:
+            raise RuntimeError(f"下载 hls.js 异常:size={len(data) if data else 0}")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(data)
+        _HLS_JS_BYTES = data
+        log.info(f"  hls.js 已缓存: {len(data)//1024}KB → {p}")
+        return _HLS_JS_BYTES
+    except Exception as e:
+        log.warning(f"  hls.js 下载失败: {e}")
+        return None
+
+
+# 启动时同步加载(若已缓存)
+try:
+    if os.path.isfile(_hls_js_path()):
+        with open(_hls_js_path(), "rb") as f:
+            _HLS_JS_BYTES = f.read()
+        log.info(f"  本地 hls.min.js 已就绪: {len(_HLS_JS_BYTES)//1024}KB")
+except Exception:
+    pass
+
 # 小雅魔改版 Alist 页面里塞的兜底脚本:阿里云盘 auto-save 被审/删后,
 # 页面会显示 "NotFound.File: ... cannot be found" 文案。这段 JS 用
 # MutationObserver 盯着 DOM 出现这段文本,触发后自动把视频源切到代理
@@ -211,17 +264,17 @@ function switchSource(url, tmpl){
 }
 
 function loadHlsJs(){
-  // 动态加载 hls.js(优先 CDN,失败回退到代理自己 host 的本地副本)
+  // 动态加载 hls.js(本地代理优先,完全避免跨站 + Edge 跟踪防护拦截 CDN)
   return new Promise((resolve,reject)=>{
     if(window.Hls&&window.Hls.isSupported()){resolve();return;}
     const cdnList=[
+      '/__static__/hls.min.js',
       'https://cdn.jsdelivr.net/npm/hls.js@1.5.13',
       'https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js',
-      '/__static__/hls.min.js',
     ];
     let idx=0;
     function tryNext(){
-      if(idx>=cdnList.length){reject(new Error('hls.js 全部源失败'));return;}
+      if(idx>=cdnList.length){reject(new Error('hls.js 全部源失败(含 CDN)'));return;}
       const s=document.createElement('script');
       s.src=cdnList[idx++];
       s.onload=()=>{
@@ -1872,6 +1925,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._handle_api_extra_roots()
             return
 
+        # 本地 hls.js 静态文件:本地 host 避免 CDN 跨站 + 跟踪防护拦截
+        if path in ("__static__/hls.min.js", "__static__/hls.js"):
+            self._serve_hls_js()
+            return
+
         # 同目录字幕文件列表
         if path == "__api__/sibling_subs":
             self._handle_api_sibling_subs()
@@ -2772,6 +2830,25 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(data)
         except BrokenPipeError:
             pass
+
+    def _serve_hls_js(self):
+        """提供本地缓存的 hls.min.js。首次请求从 CDN 拉,之后永远走本地。"""
+        data = _ensure_hls_js()
+        if data is None:
+            self._text(502,
+                "代理未能加载 hls.js,且 CDN 也连不上。手动放到 "
+                + _hls_js_path() + " 后重启代理\n", {"Content-Type": "text/plain; charset=utf-8"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except BrokenPipeError:
+            pass
+        log.info(f"  本地 hls.min.js 命中({len(data)//1024}KB)")
 
     def _serve_index(self):
         try:

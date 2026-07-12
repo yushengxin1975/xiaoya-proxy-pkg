@@ -33,6 +33,7 @@ import threading
 import sys
 import os
 import base64
+import shutil
 import logging
 import hashlib
 import collections
@@ -222,6 +223,7 @@ function m3u8For(t){
 }
 
 function switchSource(url, tmpl){
+  console.log('[cache-panel] switchSource called, url=', url, 'tmpl=', tmpl);
   // 1) ArtPlayer 实例(各种可能命名)
   const candidates=[
     ()=>window.art,
@@ -236,6 +238,7 @@ function switchSource(url, tmpl){
         if(typeof art.switchUrl==='function'){
           art.switchUrl(url,{type:'hls'});
           console.log('[proxy-fallback] ArtPlayer.switchUrl ok, tmpl=',tmpl);
+          setupCachePanel(null, url);
           return true;
         }
         if('url' in art){art.url=url;return true;}
@@ -250,7 +253,8 @@ function switchSource(url, tmpl){
     }catch(e){}
     if(window.Hls&&window.Hls.isSupported()){
       try{
-        const h=new window.Hls();h.loadSource(url);h.attachMedia(v);
+        const h=configureHls(new window.Hls());h.loadSource(url);h.attachMedia(v);
+        setupCachePanel(h, url);
         v.play().catch(()=>{});
         console.log('[proxy-fallback] hls.js 接管 video, tmpl=',tmpl);
         return true;
@@ -261,6 +265,129 @@ function switchSource(url, tmpl){
   // 3) 都没找到 → 小雅已经把 video/ArtPlayer 删了。错误文案已渲染。
   //    隐藏错误 UI,在合理位置塞一个新 <video> + hls.js。
   return injectFreshPlayer(url, tmpl);
+}
+
+function configureHls(h){
+  // 激进预加载:让 hls.js 一次性把整部电影往后拉,配合后端"边转发边写本地"
+  // 最终目标:浏览器内存 buffer = 代理磁盘缓存 = 整部电影
+  if(!h||!h.config)return h;
+  try{
+    h.config.maxBufferLength=14400;        // 4h 前向 buffer(看完释放内存)
+    h.config.maxMaxBufferLength=14400;     // 4h 最大
+    h.config.backBufferLength=14400;       // 4h 回看 buffer
+    h.config.maxBufferSize=999*1024*1024*1024; // ~1TB 字节上限(突破默认 60MB)
+    h.config.maxBufferHole=0.5;            // 允许 0.5s gap 自动跳
+    h.config.highBufferWatchdogPeriod=5;   // watchdog 5s 一次
+    h.config.nudgeOffset=0.1;              // seek 偏移更激进
+    h.config.nudgeMaxRetry=10;             // seek 失败重试 10 次
+    h.config.maxFragLookUpTolerance=0.25;  // 容许 0.25s 漂移
+    h.config.liveSyncDurationCount=3;
+    // 并发拉取:让浏览器同时拉 12 段(默认 6),灰条推进速度翻倍
+    h.config.maxParallelDownloads=12;
+    h.config.loader.maxLoadedPart=50;      // 每个 range 请求也增大
+    // 打开日志(可看到 buffer/frag 事件)
+    if(h.config.debug)h.config.debug=false;
+  }catch(e){console.warn('[proxy-fallback] hls.config 失败',e);}
+  return h;
+}
+
+// ---- 缓存进度面板:在播放器旁边显示"磁盘缓存了多少段" ----
+let __cachePanel = null;
+function setupCachePanel(h, url){
+  // h 参数保留兼容性,目前只用 url
+  return _setupCachePanel(url);
+}
+function _setupCachePanel(url){
+  if(__cachePanel)return;
+  console.log('[cache-panel] setup called, url=', url);
+  try{
+    const decoded = (()=>{try{return decodeURIComponent(url)}catch(e){return url}})();
+    console.log('[cache-panel] decoded url=', decoded);
+    const m = decoded.match(/\/__hls__\/(.+?)__tmpl__(\w+)/);
+    if(!m){console.warn('[cache-panel] URL 不匹配');return;}
+    // m[1] 已经以 / 开头(/path/),加 '/' 会变成 //path/
+    // 但 server 存的 video_key 是 /path/__tmpl__<tmpl>,所以直接用 m[1] + __tmpl__ + m[2]
+    let path = m[1];
+    // 规范化:确保只有一个前导 /
+    path = '/' + path.replace(/^\/+/, '');
+    const tmpl = m[2];
+    const cache_key = path + '__tmpl__' + tmpl;
+    const alist_path = path;
+    console.log('[cache-panel] parsed cache_key=', cache_key, 'tmpl=', tmpl);
+
+    // 创建面板
+    const panel = document.createElement('div');
+    panel.id = '__cache_panel__';
+    panel.style.cssText = 'position:fixed;bottom:80px;right:16px;z-index:99999;'+
+      'background:rgba(0,0,0,0.78);color:#fff;padding:10px 14px;border-radius:6px;'+
+      'font-family:Consolas,Monaco,monospace;font-size:12px;line-height:1.5;'+
+      'min-width:260px;box-shadow:0 2px 12px rgba(0,0,0,0.4);';
+    panel.innerHTML = `
+      <div style="opacity:0.7;font-size:11px;margin-bottom:4px;">📥 磁盘缓存进度</div>
+      <div id="__cache_text__" style="font-size:13px;">初始化中...</div>
+      <div id="__cache_bar__" style="height:6px;background:#333;border-radius:3px;margin-top:6px;overflow:hidden;">
+        <div id="__cache_fill__" style="height:100%;width:0%;background:linear-gradient(90deg,#4fc3f7,#81c784);transition:width 0.6s;"></div>
+      </div>
+      <div id="__cache_detail__" style="opacity:0.6;font-size:10px;margin-top:4px;"></div>
+    `;
+    document.body.appendChild(panel);
+    __cachePanel = panel;
+    console.log('[cache-panel] 面板已创建,id=', panel.id, 'parent=', panel.parentElement?.tagName);
+
+    // 防被外部代码删除:监听 DOM 变化,如果面板消失就重建
+    if(!window.__cachePanelObserver){
+      window.__cachePanelObserver = new MutationObserver(()=>{
+        if(__cachePanel && !document.body.contains(__cachePanel)){
+          console.warn('[cache-panel] 面板被外部代码移除,重建');
+          try{document.body.appendChild(__cachePanel)}catch(e){}
+        }
+      });
+      window.__cachePanelObserver.observe(document.body, {childList:true, subtree:true});
+    }
+
+    // 立即注册(不等 fetch m3u8)→ worker 启动要靠 CURRENT_VIDEO 匹配
+    fetch('/__api__/cache/register', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({cache_key, alist_path, template:tmpl, total_segments:0})
+    }).catch(()=>{});
+
+    // 拉 m3u8 数总段数(更新 total_segments)
+    fetch(url).then(r=>r.text()).then(text=>{
+      const segCount = (text.match(/\.ts(\?|$|\s)/g)||[]).length;
+      console.log('[cache-panel] m3u8 段数 =', segCount);
+      // 重新注册,带上正确的 total_segments
+      fetch('/__api__/cache/register', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({cache_key, alist_path, template:tmpl, total_segments:segCount})
+      }).catch(()=>{});
+    }).catch(e=>console.warn('[cache-panel] m3u8 fetch fail', e));
+
+    // 每 5 秒拉一次缓存状态
+    setInterval(async ()=>{
+      try{
+        const r = await fetch('/__api__/cache/stats');
+        const j = await r.json();
+        const cur = j.data && j.data.current;
+        if(!cur || !cur.cache_key){setText('未注册当前视频');return;}
+        // 找匹配的 top_video
+        const v = (j.data.top_videos||[]).find(x => x.video_key === cur.cache_key);
+        if(!v){setText('此视频暂无缓存', cur);return;}
+        const cached = v.cached_segments, total = v.total_segments;
+        const pct = total > 0 ? (cached/total*100) : 0;
+        const sizeMB = (cached * 4.5).toFixed(0); // 估算 ~4.5MB/段
+        setText(
+          `▓ ${cached} / ${total} 段 (${pct.toFixed(1)}%)`,
+          {...cur, cached_segments:cached, hit_rate:pct}
+        );
+        document.getElementById('__cache_fill__').style.width = pct + '%';
+      }catch(e){/* 静默 */}
+    }, 5000);
+
+    function setText(t, _cur){
+      const el = document.getElementById('__cache_text__');
+      if(el)el.textContent = t;
+    }
+  }catch(e){console.warn('[cache-panel] init failed', e);}
 }
 
 function loadHlsJs(){
@@ -326,9 +453,10 @@ function injectFreshPlayer(url, tmpl){
   // 异步拉 hls.js 然后接管
   loadHlsJs().then(()=>{
     try{
-      const h=new window.Hls();
+      const h=configureHls(new window.Hls());
       h.loadSource(url);
       h.attachMedia(v);
+      setupCachePanel(h, url);
       v.play().catch(()=>{});
       console.log('[proxy-fallback] 注入新 <video> + hls.js, tmpl=',tmpl);
     }catch(e){
@@ -346,6 +474,7 @@ function fallback(reason){
   if(active)return;
   active=true;
   console.log('[proxy-fallback] 触发,原因=',reason,'path=',alistPath());
+  // fallback 触发时也调用 setupCachePanel,虽然此时 url 还没确定,但切源后会再调用
   function next(){
     if(idx>=TEMPLATES.length){console.error('[proxy-fallback] 所有模板都失败');return;}
     const t=TEMPLATES[idx++],u=m3u8For(t);
@@ -414,6 +543,31 @@ if(window.fetch&&!window.__proxy_fetch_hooked){
 // 只靠 MutationObserver 监听新出现的错误节点。ArtPlayer 自身报错通常会
 // 渲染一段错误文本到 DOM,会被 observer 捕获;若抓不到,用户可手动刷一次。
 
+// ---- 4. 兜底定时器:每 3 秒检查一次当前播放是否走代理通道 ----
+// 适用于 fallback() 没被触发但视频实际通过 /__hls__/ 通道播放的情况
+setInterval(()=>{
+  try{
+    // 检查 <video> 元素的 src 或 HLS 实例
+    const vids=document.querySelectorAll('video');
+    for(const v of vids){
+      // 1. 直接看 src
+      if(v.src && v.src.includes('/__hls__/') && !__cachePanel){
+        console.log('[cache-panel] 兜底:检测到 <video src=/__hls__/>,主动建面板');
+        _setupCachePanel(v.src);
+        return;
+      }
+      // 2. 看 ArtPlayer 的 hls 实例
+      const arts=[window.art,(window.AP&&window.AP.instance),document.querySelector('.art-video-player')&&document.querySelector('.art-video-player').__art];
+      const art=arts.find(Boolean);
+      if(art && art.url && art.url.includes && art.url.includes('/__hls__/') && !__cachePanel){
+        console.log('[cache-panel] 兜底:检测到 ArtPlayer.url=/__hls__/,主动建面板');
+        _setupCachePanel(art.url);
+        return;
+      }
+    }
+  }catch(e){}
+}, 3000);
+
 // ---- 4. 字幕注入:小雅页走的不是代理 /__hls__/ 时,也能让 ArtPlayer 出字幕选择 ----
 // 小雅页面直接读阿里云盘的原始 m3u8(没字幕声明),所以 ArtPlayer 看不到字幕。
 // 这里主动调 video_preview 拿字幕列表,塞 <track> 元素到 <video> 里。
@@ -474,6 +628,11 @@ function tryInjectSubtitles(){
     }
     const subs=(((d.data||{}).video_preview_play_info)||{}).live_transcoding_subtitle_task_list||[];
     console.log('[proxy-fallback] video_preview subs=',subs.length);
+    // 缓存进度面板:直接用 video_preview 拿到的 alist_path 注册(不需要等 fallback)
+    try{
+      const url='/__hls__/'+encodeURIComponent(p+'__tmpl__QHD')+'/media.m3u8';
+      _setupCachePanel(url);
+    }catch(e){console.warn('[cache-panel] 启动失败',e);}
     const vids=document.querySelectorAll('video');
     console.log('[proxy-fallback] 当前 <video> 数=',vids.length);
     if(vids.length===0){console.warn('[proxy-fallback] 找不到 <video>');return false;}
@@ -1109,6 +1268,14 @@ class UrlCache:
             url, _subs, expire = entry
             return url, time.time() < expire
 
+    def peek(self, path):
+        """返回已存的 URL(忽略是否过期)。用于 video_preview 失败时兜底尝试旧签名。"""
+        with self.lock:
+            entry = self.cache.get(path)
+            if not entry:
+                return None
+            return entry[0]
+
     def get_subs(self, path):
         """返回已存的字幕列表(可能为空)"""
         with self.lock:
@@ -1132,6 +1299,400 @@ class UrlCache:
     def invalidate(self, path):
         with self.lock:
             self.cache.pop(path, None)
+
+
+# ============== .ts 段本地缓存 + 全量预取 + 兜底 m3u8 ==============
+# 配置
+LOCAL_CACHE_ENABLED = _env("LOCAL_CACHE_ENABLED", "true").lower() in ("1","true","yes","on")
+LOCAL_CACHE_DIR = _env("LOCAL_CACHE_DIR", "") or os.path.join(
+    os.environ.get("XDG_CACHE_HOME", "") or os.path.expanduser("~/.cache"),
+    "alist_proxy", "ts_segments",
+)
+LOCAL_CACHE_MAX_GB = float(_env("LOCAL_CACHE_MAX_GB", "200") or "200")
+LOCAL_CACHE_FULL_PREFETCH = _env("LOCAL_CACHE_FULL_PREFETCH", "true").lower() in ("1","true","yes","on")
+LOCAL_CACHE_PREFETCH_INTERVAL = float(_env("LOCAL_CACHE_PREFETCH_INTERVAL", "0.15") or "0.15")  # 段间隔秒
+
+
+class LocalSegmentCache:
+    """保存 .ts 段字节到本地,upstream 失败时无缝回退。
+
+    Key: 视频标识 + segment 名 → 文件路径: <base>/<sha256[0:2]>/<sha256>+ .meta
+    meta 文件存 mtime 用于 LRU 淘汰。"""
+    META_SUFFIX = ".meta"
+    MANIFEST_SUFFIX = ".manifest.json"
+
+    def __init__(self, base_dir, max_gb=200):
+        self.base_dir = base_dir
+        self.max_bytes = int(max_gb * 1024 * 1024 * 1024)
+        self.lock = threading.Lock()
+        os.makedirs(self.base_dir, exist_ok=True)
+
+    @staticmethod
+    def _key_path(key):
+        h = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return os.path.join(h[:2], h)
+
+    def _full_path(self, key):
+        return os.path.join(self.base_dir, self._key_path(key))
+
+    def has(self, key):
+        p = self._full_path(key)
+        return os.path.isfile(p) and os.path.isfile(p + self.META_SUFFIX)
+
+    def save(self, key, data):
+        try:
+            with self.lock:
+                p = self._full_path(key)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                tmp = p + ".tmp"
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, p)
+                with open(p + self.META_SUFFIX, "w", encoding="utf-8") as f:
+                    f.write(str(int(time.time())))
+        except Exception as e:
+            log.debug(f"  本地缓存保存失败(忽略): {e}")
+            return False
+        threading.Thread(target=self._maybe_evict, daemon=True).start()
+        return True
+
+    def load(self, key):
+        p = self._full_path(key)
+        meta = p + self.META_SUFFIX
+        if not (os.path.isfile(p) and os.path.isfile(meta)):
+            return None
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+            try:
+                with open(meta, "w", encoding="utf-8") as f:
+                    f.write(str(int(time.time())))
+            except Exception:
+                pass
+            return data
+        except Exception as e:
+            log.debug(f"  本地缓存读取失败: {e}")
+            return None
+
+    def load_path(self, key):
+        """返回磁盘路径(供 /__static__/ 等端点直接 sendfile)"""
+        p = self._full_path(key)
+        meta = p + self.META_SUFFIX
+        if os.path.isfile(p) and os.path.isfile(meta):
+            return p
+        return None
+
+    def get_path(self, cache_key, filename):
+        """根据 cache_key 和 filename 返回本地缓存路径(供 .ts 请求用)"""
+        key = f"{cache_key}/{filename}"
+        return self.load_path(key)
+
+    def save_manifest(self, video_key, segment_urls, durations=None):
+        """保存某视频的 segment URL 列表(供全量预取 worker 用)
+        durations: 可选,每段 EXTINF 时长(秒),与 segment_urls 等长
+        """
+        try:
+            p = self._full_path(video_key) + self.MANIFEST_SUFFIX
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            tmp = p + ".tmp"
+            payload = {"video_key": video_key, "segments": segment_urls,
+                       "saved_at": time.time()}
+            if durations and len(durations) == len(segment_urls):
+                payload["durations"] = durations
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, p)
+        except Exception as e:
+            log.debug(f"  写 manifest 失败: {e}")
+
+    def load_manifest(self, video_key):
+        """返回 (segments_urls, durations) 元组。durations 可能为 None。"""
+        try:
+            p = self._full_path(video_key) + self.MANIFEST_SUFFIX
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            segs = d.get("segments", []) or []
+            durs = d.get("durations")
+            return segs, durs
+        except Exception:
+            return [], None
+        except Exception:
+            return None
+
+    def _dir_size(self):
+        total = 0
+        try:
+            for root, _d, files in os.walk(self.base_dir):
+                for fn in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, fn))
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+        return total
+
+    def _maybe_evict(self):
+        try:
+            with self.lock:
+                total = self._dir_size()
+                if total <= self.max_bytes:
+                    return
+                entries = []
+                for root, _d, files in os.walk(self.base_dir):
+                    for fn in files:
+                        if not fn.endswith(self.META_SUFFIX):
+                            continue
+                        full = os.path.join(root, fn)
+                        try:
+                            entries.append((os.path.getmtime(full), full))
+                        except OSError:
+                            pass
+                entries.sort()
+                for _ts, meta_path in entries:
+                    if total <= self.max_bytes * 0.9:
+                        break
+                    data_path = meta_path[:-len(self.META_SUFFIX)]
+                    try:
+                        sz = os.path.getsize(data_path) if os.path.isfile(data_path) else 0
+                        os.remove(meta_path)
+                        if os.path.isfile(data_path):
+                            os.remove(data_path)
+                        total -= sz
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    def status(self):
+        try:
+            n_files = sum(len(fs) for _r, _d, fs in os.walk(self.base_dir)) // 2
+            return {
+                "enabled": True, "base_dir": self.base_dir,
+                "max_gb": self.max_bytes / (1024**3),
+                "size_bytes": self._dir_size(), "segments": n_files,
+            }
+        except Exception:
+            return {"enabled": True, "base_dir": self.base_dir, "max_gb": self.max_bytes / (1024**3),
+                    "size_bytes": 0, "segments": 0}
+
+
+class LocalCacheWorker:
+    """全量预取 worker:解析 m3u8 后,后台拉取所有段到本地。
+
+    工作流程:
+    1. _proxy_m3u8 解析所有 segment URL → 存 manifest
+    2. 启动 worker 线程(每个 video_key 最多 1 个)
+    3. worker 顺序拉取未下载的段,存到 LocalSegmentCache
+    4. m3u8 URL 15 分钟过期,worker 定期调 get_hls_url 续签
+    5. 上游完全 404/风控时 worker 自动停止,已下载的段保留
+    """
+    def __init__(self, seg_cache, client):
+        self.seg_cache = seg_cache
+        self.client = client
+        self._workers = {}  # video_key -> Thread
+        self._stop_flags = {}  # video_key -> threading.Event
+        self._worker_state = {}  # video_key -> {i, last_action, last_action_ts}
+        self._lock = threading.Lock()
+
+    def ensure_started(self, video_key, alist_path, template_id, segment_urls, durations=None):
+        """video_key 是 m3u8 的 cache_key(/.../movie.mkv__tmpl__QHD)。
+        segment_urls 来自 m3u8 内容里所有段。durations 是可选的 EXTINF 列表。"""
+        if not self.seg_cache:
+            return
+        # 保存 manifest 给跨进程重启用(下次启动能继续拉)
+        self.seg_cache.save_manifest(video_key, segment_urls, durations=durations)
+        with self._lock:
+            if video_key in self._workers and self._workers[video_key].is_alive():
+                log.info(f"  预取 worker 已在运行: {video_key[:50]}")
+                return
+            # 只在用户正在播放该视频时才启动 worker
+            # 否则 m3u8 会被代理解析,worker 启动后立即因 CURRENT_VIDEO 不匹配而退出
+            with CURRENT_VIDEO_LOCK:
+                cur_key = CURRENT_VIDEO.get("cache_key") or ""
+                cur_ts = CURRENT_VIDEO.get("registered_at", 0)
+            if cur_key != video_key or (time.time() - cur_ts > 86400):
+                log.info(f"  暂不启动 worker(未匹配当前播放: cur={cur_key[:40] or '(空)'} vs vk={video_key[:40]}): {video_key[:50]}")
+                return
+            stop = threading.Event()
+            self._stop_flags[video_key] = stop
+            t = threading.Thread(
+                target=self._run, args=(video_key, alist_path, template_id, segment_urls, durations, stop),
+                daemon=True, name=f"local-cache-{hashlib.md5(video_key.encode()).hexdigest()[:6]}")
+            self._workers[video_key] = t
+            t.start()
+            log.info(f"  启动全量预取 worker: {video_key[:50]} ({len(segment_urls)} 段,thread={t.name})")
+
+    def _run(self, video_key, alist_path, template_id, segment_urls, durations, stop_event):
+        """顺序拉取所有段。15 分钟刷一次 m3u8 URL。
+        仅在 CURRENT_VIDEO 等于本 video_key 时运行,前端 30 分钟没心跳则自动停止。
+        """
+        log.info(f"  预取 worker 启动: vk={video_key[:50]}, segments={len(segment_urls)}")
+        self._worker_state[video_key] = {"i": 0, "last_action": "start", "ts": time.time()}
+        try:
+            i = 0
+            refresh_every = max(60, int(900 / max(0.05, LOCAL_CACHE_PREFETCH_INTERVAL)))
+            last_refresh = 0
+            m3u8_url = None
+            stale_count = 0  # 连续多少轮 CURRENT_VIDEO 不匹配
+            check_count = 0
+            while i < len(segment_urls) and not stop_event.is_set():
+                # 检查"是否还在播放当前视频"
+                with CURRENT_VIDEO_LOCK:
+                    cur_key = CURRENT_VIDEO.get("cache_key")
+                    cur_ts = CURRENT_VIDEO.get("registered_at", 0)
+                # 容忍启动瞬间:CURRENT_VIDEO 还没注册(空)→ 等待 60 轮 ≈ 9s
+                if not cur_key:
+                    # CURRENT_VIDEO 还没注册 → 等待(容忍启动 race)
+                    # 最多等 5 分钟,超时则停止
+                    stale_count += 1
+                    if stale_count >= 2000:  # 2000 * 0.15s = 300s = 5 分钟
+                        log.info(f"  预取 worker 等待超时停止(CURRENT_VIDEO 一直空): {video_key[:50]}")
+                        break
+                    if stale_count % 100 == 0:
+                        log.info(f"  预取 worker 等待 CURRENT_VIDEO 注册: {video_key[:50]} ({stale_count} 轮)")
+                    time.sleep(0.15)
+                    continue
+                # CURRENT_VIDEO 已注册,但视频不匹配 → 用户切走了
+                if cur_key != video_key or (time.time() - cur_ts > 86400):
+                    stale_count += 1
+                    if stale_count >= 3:
+                        log.info(f"  预取 worker 停止(用户切走 cur={cur_key[:40] if cur_key else None} vs vk={video_key[:40]}): {video_key[:50]}")
+                        break
+                    continue
+                stale_count = 0
+                # 检查本地是否已下载
+                seg_url = segment_urls[i]
+                seg_key = f"seg:{video_key}:{i:05d}:{seg_url}"
+                if self.seg_cache.has(seg_key):
+                    i += 1
+                    continue
+                # 周期性刷 m3u8 URL(签名会过期)
+                if m3u8_url is None or (i - last_refresh) >= refresh_every:
+                    fresh, _ = self.client.get_hls_url(alist_path, template_id)
+                    if not fresh:
+                        # 上游完全拉不到了,停止
+                        log.warning(f"  预取 worker:上游 {alist_path} 拉不到了,停止")
+                        break
+                    m3u8_url = fresh
+                    last_refresh = i
+                    # 重新解析 m3u8 拿新段 URL
+                    try:
+                        req = urllib.request.Request(m3u8_url, headers={"User-Agent": "Mozilla/5.0 alist-proxy"})
+                        with urllib.request.urlopen(req, timeout=30) as up:
+                            if up.status == 200:
+                                content = up.read().decode("utf-8", errors="replace")
+                                new_segs = []
+                                new_durs = []
+                                base = m3u8_url.rsplit("/", 1)[0]
+                                m3u8_q = m3u8_url.split("?", 1)[1] if "?" in m3u8_url else ""
+                                lines = content.split("\n")
+                                cur_dur = None
+                                for line in lines:
+                                    s = line.strip()
+                                    if not s:
+                                        continue
+                                    if s.startswith("#EXTINF:"):
+                                        # 提取真实时长:"#EXTINF:12.345," → 12.345
+                                        try:
+                                            cur_dur = float(s.split(":", 1)[1].split(",", 1)[0])
+                                        except Exception:
+                                            cur_dur = None
+                                        continue
+                                    if s.startswith("#"):
+                                        continue
+                                    p = s.split("?", 1)[0]
+                                    if p.endswith(".ts") or ".ts?" in s:
+                                        if "?" in s:
+                                            fname, q = s.split("?", 1)
+                                        else:
+                                            fname, q = s, m3u8_q
+                                        url = f"{base}/{fname}?{q}" if q else f"{base}/{fname}"
+                                        new_segs.append(url)
+                                        new_durs.append(cur_dur)
+                                        cur_dur = None
+                                if new_segs:
+                                    segment_urls = new_segs
+                                    durations = new_durs
+                                    self.seg_cache.save_manifest(video_key, segment_urls, durations=new_durs)
+                    except Exception as e:
+                        log.debug(f"  刷新 m3u8 失败: {e}")
+                # 拉当前段
+                try:
+                    req = urllib.request.Request(seg_url, headers={"User-Agent": "Mozilla/5.0 alist-proxy"})
+                    with urllib.request.urlopen(req, timeout=20) as up:
+                        if up.status == 200:
+                            data = up.read()
+                            if data and len(data) > 100:
+                                self.seg_cache.save(seg_key, data)
+                                # 同时以 {cache_key}/{filename} 格式保存(供 .ts 请求直接查)
+                                fname = seg_url.split("?", 1)[0].rsplit("/", 1)[-1]
+                                lookup_key = f"{video_key}/{fname}"
+                                self.seg_cache.save(lookup_key, data)
+                        elif up.status in (403, 404):
+                            log.warning(f"  预取 worker:段 {i} upstream {up.status},跳过")
+                except Exception as e:
+                    log.debug(f"  预取段 {i} 失败: {e}")
+                i += 1
+                time.sleep(LOCAL_CACHE_PREFETCH_INTERVAL)
+            log.info(f"  预取 worker 结束: {video_key[:50]} (处理到段 {i}/{len(segment_urls)})")
+        except Exception as e:
+            log.debug(f"  预取 worker 异常: {e}")
+
+
+def build_fallback_m3u8(alist_path, cache_key=None, hls_cache_ref=None, segment_duration=10800):
+    """video_preview 失败时,生成降级 m3u8。
+
+    阶段 B(有 manifest):多段 m3u8,
+        缓存命中 → /__hls__/<key>/<filename> (本地)
+        缓存未命中 → /__hls__/<key>/<filename> (handler 会回退上游并自动缓存)
+    阶段 A(无 manifest):单段渐进式 /__stream__/<path>
+    """
+    encoded = urllib.parse.quote(alist_path.lstrip("/"), safe="/")
+    base_url = f"http://{LISTEN_HOST}:{LISTEN_PORT}"
+
+    # 尝试加载缓存 manifest(worker 之前存下来的段列表)
+    segments = None
+    durations = None
+    if cache_key and TS_SEGMENT_CACHE:
+        segments, durations = TS_SEGMENT_CACHE.load_manifest(cache_key)
+
+    if segments:
+        # 阶段 B:有 manifest → 生成多段 m3u8,EXTINF 用真实时长(避免 PTS 漂移)
+        cache_key_enc = urllib.parse.quote(cache_key.lstrip("/"))
+        max_dur = 60.0
+        lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:VOD"]
+        hit_count = 0
+        for idx, seg_url in enumerate(segments):
+            fname = seg_url.split("?", 1)[0].rsplit("/", 1)[-1]
+            if not fname.endswith(".ts"):
+                continue
+            # 用真实时长(若 manifest 里存了);否则估算 60s
+            dur = 60.0
+            if durations and idx < len(durations) and durations[idx]:
+                dur = float(durations[idx])
+            if dur > max_dur:
+                max_dur = dur
+            lines.append(f"#EXTINF:{dur:.3f},")
+            lines.append(f"{base_url}/__hls__/{cache_key_enc}/{fname}")
+            if TS_SEGMENT_CACHE.get_path(cache_key, fname):
+                hit_count += 1
+        lines.insert(3, f"#EXT-X-TARGETDURATION:{int(max_dur)+1}")
+        lines.append("#EXT-X-ENDLIST")
+        log.info(f"  降级 m3u8(多段,真实EXTINF): {alist_path[:60]} ({hit_count}/{len(segments)} 已缓存,maxDur={max_dur:.0f}s)")
+        return "\n".join(lines)
+
+    # 阶段 A:无 manifest → 单段渐进式
+    log.info(f"  降级 m3u8(单段): {alist_path[:60]}")
+    return (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:3\n"
+        "#EXT-X-PLAYLIST-TYPE:VOD\n"
+        f"#EXT-X-TARGETDURATION:{segment_duration}\n"
+        f"#EXTINF:{segment_duration}.0,\n"
+        f"{base_url}/__stream__/{encoded}\n"
+        "#EXT-X-ENDLIST\n"
+    )
 
 
 # ============== 播放历史 ==============
@@ -1793,6 +2354,20 @@ class DirectoryIndexer:
 
 
 # ============== 代理请求处理器 ==============
+# ============== 代理请求处理器 ==============
+# 本地 .ts 段缓存 + 全量预取(防阿里云盘风控 / 转存被删)
+TS_SEGMENT_CACHE = None
+CACHE_WORKER = None
+# 当前播放的视频(前端通过 /__api__/cache/register 注册,带 TTL 自动过期)
+CURRENT_VIDEO = {"cache_key": None, "alist_path": None, "template": None,
+                 "total_segments": 0, "registered_at": 0}
+CURRENT_VIDEO_LOCK = threading.Lock()
+if LOCAL_CACHE_ENABLED:
+    _client_for_cache = AlistClient()
+    TS_SEGMENT_CACHE = LocalSegmentCache(LOCAL_CACHE_DIR, max_gb=LOCAL_CACHE_MAX_GB)
+    CACHE_WORKER = LocalCacheWorker(TS_SEGMENT_CACHE, _client_for_cache)
+    log.info(f"  本地 .ts 段缓存已启用: dir={LOCAL_CACHE_DIR} max={LOCAL_CACHE_MAX_GB:.0f}GB")
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     client = AlistClient()
     cache = UrlCache()
@@ -1925,6 +2500,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._handle_api_extra_roots()
             return
 
+        # 本地 .ts 段缓存统计:总大小/段数/视频命中率
+        if path == "__api__/cache/stats":
+            self._handle_api_cache_stats()
+            return
+
+        # 前端注册"当前正在播放"的视频,用于在 stats 里标记 is_current
+        if path == "__api__/cache/register":
+            self._handle_api_cache_register()
+            return
+
         # 本地 hls.js 静态文件:本地 host 避免 CDN 跨站 + 跟踪防护拦截
         if path in ("__static__/hls.min.js", "__static__/hls.js"):
             self._serve_hls_js()
@@ -2044,6 +2629,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         if path == "__api__/history/record":
             self._handle_api_history_record()
+            return
+        if path == "__api__/cache/register":
+            self._handle_api_cache_register()
+            return
+        if path == "__api__/debug/workers":
+            self._handle_api_debug_workers()
             return
         self._reverse_proxy("POST")
 
@@ -2351,7 +2942,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 if not m3u8_url:
                     log.warning(f"  video_preview 同步重试用尽,后台继续尝试: {cache_key[:60]}")
                     self._schedule_bg_refresh(cache_key, alist_path, template_id)
-                    self._text(502, f"Alist 暂时无法提供 HLS URL,后台续签中 ({alist_path})\n")
+                    # 降级:生成 m3u8(有缓存走多段本地,无缓存走单段 /__stream__)
+                    fallback = build_fallback_m3u8(alist_path, cache_key=cache_key)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                    self.send_header("Content-Length", str(len(fallback)))
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    if not head_only:
+                        try:
+                            self.wfile.write(fallback.encode("utf-8"))
+                        except BrokenPipeError:
+                            pass
+                    log.info(f"  video_preview 失败,降级为单段 m3u8: {alist_path[:60]}")
                     return
                 self.hls_cache.put(cache_key, m3u8_url, subs=subs)
                 log.info(f"  获取新 HLS URL(缓存至 {URL_CACHE_TTL // 60} 分钟后),subs={len(subs)}")
@@ -2364,7 +2967,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                   if "__tmpl__" in cache_key else cache_key)
                     self.history.record(alist_path)
             else:
-                # .ts 文件:从 hls_cache 拿完整 URL(含 query,在 _proxy_m3u8 里缓存)
+                # .ts 文件:先查本地缓存
+                if TS_SEGMENT_CACHE:
+                    local_path = TS_SEGMENT_CACHE.get_path(cache_key, filename)
+                    if local_path:
+                        log.info(f"  .ts 命中本地缓存: {filename}")
+                        self._serve_local_file(local_path, head_only=head_only)
+                        return
+                # 从 hls_cache 拿完整 URL(含 query,在 _proxy_m3u8 里缓存)
                 ts_cache_key = f"{cache_key}/{filename}"
                 ts_url, ts_fresh = self.hls_cache.get(ts_cache_key)
                 if not ts_url or not ts_fresh:
@@ -2379,18 +2989,34 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     if fresh_m3u8_url:
                         m3u8_url = fresh_m3u8_url
                         self.hls_cache.put(cache_key, m3u8_url, subs=fresh_subs)
+                        # 重新下载 m3u8 内容(静默模式,只更新 .ts 缓存)
+                        self._proxy_m3u8(m3u8_url, cache_key, head_only=False, silent=True)
+                        ts_url, ts_fresh = self.hls_cache.get(ts_cache_key)
                     else:
-                        log.warning(f"  .ts 续签失败,后台继续尝试: {cache_key[:60]}")
-                        self._schedule_bg_refresh(cache_key, alist_path, template_id)
-                    # 重新下载 m3u8 内容(静默模式,只更新 .ts 缓存)
-                    self._proxy_m3u8(m3u8_url, cache_key, head_only=False, silent=True)
-                    ts_url, ts_fresh = self.hls_cache.get(ts_cache_key)
+                        # video_preview 失败 → 兜底:尝试已过期的 .ts URL(签名可能仍有效)
+                        stale_url = self.hls_cache.peek(ts_cache_key)
+                        if stale_url:
+                            log.info(f"  .ts 使用过期 URL 兜底: {filename}")
+                            ts_url, ts_fresh = stale_url, False
+                        else:
+                            log.warning(f"  .ts 续签失败,后台继续尝试: {cache_key[:60]}")
+                            self._schedule_bg_refresh(cache_key, alist_path, template_id)
 
                 if not ts_url:
+                    # 尝试从本地缓存读取
+                    if TS_SEGMENT_CACHE:
+                        local_path = TS_SEGMENT_CACHE.get_path(cache_key, filename)
+                        if local_path:
+                            log.info(f"  .ts 命中本地缓存(上游无 URL): {filename}")
+                            self._serve_local_file(local_path, head_only=head_only)
+                            return
                     self._text(502, f"无法获取 .ts URL: {filename}\n")
                     return
 
-                ok = self._proxy_to(ts_url, ts_cache_key, head_only=head_only)
+                # 转发上游,同时异步写本地缓存(供后续播放)
+                ok = self._proxy_to(ts_url, ts_cache_key, head_only=head_only,
+                                      cache_to=TS_SEGMENT_CACHE, cache_key=cache_key,
+                                      cache_filename=filename)
 
             if ok:
                 return
@@ -2429,33 +3055,49 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
                 lines = content.split("\n")
                 rewritten = []
+                seg_full_urls = []  # 收集完整 .ts URL(供全量预取 worker 用)
+                seg_durations = []  # 每段 EXTINF 时长(秒),供降级 m3u8 用
+                cur_dur = None
                 for line in lines:
                     stripped = line.strip()
-                    if stripped and not stripped.startswith("#"):
-                        path_part = stripped.split("?", 1)[0]
-                        if path_part.endswith(".ts") or ".ts?" in stripped:
-                            # 分离 filename 和 query
-                            if "?" in stripped:
-                                fname, ts_query = stripped.split("?", 1)
-                            else:
-                                fname, ts_query = stripped, m3u8_query
-
-                            # 拼完整的 .ts URL(阿里 CDN)
-                            if ts_query:
-                                full_ts_url = f"{m3u8_base}/{fname}?{ts_query}"
-                            else:
-                                full_ts_url = f"{m3u8_base}/{fname}"
-
-                            # 存入缓存,key = cache_key/fname
-                            ts_cache_key = f"{cache_key}/{fname}"
-                            self.hls_cache.put(ts_cache_key, full_ts_url)
-
-                            # 改写为本地 URL(不含 query)
-                            rewritten.append(f"{base_path}/{fname}")
+                    if not stripped:
+                        continue
+                    if stripped.startswith("#EXTINF:"):
+                        try:
+                            cur_dur = float(stripped.split(":", 1)[1].split(",", 1)[0])
+                        except Exception:
+                            cur_dur = None
+                        # 保持原样往下传(EXTINF 不需要改写)
+                        rewritten.append(line)
+                        continue
+                    if stripped.startswith("#"):
+                        rewritten.append(line)
+                        continue
+                    path_part = stripped.split("?", 1)[0]
+                    if path_part.endswith(".ts") or ".ts?" in stripped:
+                        # 分离 filename 和 query
+                        if "?" in stripped:
+                            fname, ts_query = stripped.split("?", 1)
                         else:
-                            rewritten.append(line)
+                            fname, ts_query = stripped, m3u8_query
+
+                        # 拼完整的 .ts URL(阿里 CDN)
+                        if ts_query:
+                            full_ts_url = f"{m3u8_base}/{fname}?{ts_query}"
+                        else:
+                            full_ts_url = f"{m3u8_base}/{fname}"
+
+                        # 存入缓存,key = cache_key/fname
+                        ts_cache_key = f"{cache_key}/{fname}"
+                        self.hls_cache.put(ts_cache_key, full_ts_url)
+                        seg_full_urls.append(full_ts_url)
+                        seg_durations.append(cur_dur)
+
+                        # 改写为本地 URL(不含 query)
+                        rewritten.append(f"{base_path}/{fname}")
                     else:
                         rewritten.append(line)
+                    cur_dur = None
 
                 # 在 m3u8 顶部注入字幕声明(来自 video_preview API 的 subtitle_task_list)
                 # 阿里云盘转码 m3u8 不带字幕声明,播放器看不到字幕选项
@@ -2520,6 +3162,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             self._schedule_bg_refresh(cache_key, ap_, tp_)
                 except Exception as e:
                     log.debug(f"  pre-refresh 调度失败(忽略): {e}")
+                # === 全量预取:启动 worker 后台下载所有段到本地 ===
+                # 一旦 video_preview 500 / share 风控,本地已有完整副本,玩家无感
+                log.info(f"  全量预取条件: LOCAL={LOCAL_CACHE_FULL_PREFETCH} segs={len(seg_full_urls)} silent={silent} worker={CACHE_WORKER is not None}")
+                if LOCAL_CACHE_FULL_PREFETCH and seg_full_urls and not silent:
+                    try:
+                        if "__tmpl__" in cache_key:
+                            ap_, tp_ = cache_key.rsplit("__tmpl__", 1)
+                        else:
+                            ap_, tp_ = cache_key, "QHD"
+                        if CACHE_WORKER:
+                            CACHE_WORKER.ensure_started(cache_key, ap_, tp_, seg_full_urls, durations=seg_durations)
+                    except Exception as e:
+                        log.debug(f"  启动预取 worker 失败(忽略): {e}")
                 return True
         except urllib.error.HTTPError as e:
             if e.code == 403:
@@ -2717,8 +3372,66 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         subs.sort(key=lambda s: (0 if s["lang"] == "default" else 1, s["lang"], s["name"]))
         self._json(200, {"code": 200, "message": "success", "data": subs})
 
-    def _proxy_to(self, raw_url, alist_path, head_only=False):
-        """转发请求到 raw_url。返回 True 表示已处理(无论成功失败),False 表示需要刷新 URL 重试"""
+    def _serve_local_file(self, local_path, head_only=False):
+        """从本地文件系统提供文件(支持 Range 请求)"""
+        try:
+            file_size = os.path.getsize(local_path)
+            range_header = self.headers.get("Range", "")
+            if range_header:
+                m = re.match(r"bytes=(\d+)-(\d*)", range_header)
+                if m:
+                    start = int(m.group(1))
+                    end_str = m.group(2)
+                    end = int(end_str) if end_str else file_size - 1
+                    length = end - start + 1
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                    self.send_header("Content-Length", str(length))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.send_header("Content-Type", "video/mp2t")
+                    self.end_headers()
+                    if not head_only:
+                        with open(local_path, "rb") as f:
+                            f.seek(start)
+                            remaining = length
+                            while remaining > 0:
+                                chunk = f.read(min(65536, remaining))
+                                if not chunk:
+                                    break
+                                try:
+                                    self.wfile.write(chunk)
+                                except BrokenPipeError:
+                                    return
+                                remaining -= len(chunk)
+                    return
+            self.send_response(200)
+            self.send_header("Content-Length", str(file_size))
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Type", "video/mp2t")
+            self.end_headers()
+            if not head_only:
+                with open(local_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        try:
+                            self.wfile.write(chunk)
+                        except BrokenPipeError:
+                            return
+        except Exception as e:
+            log.error(f"  本地文件服务异常: {e}")
+            try:
+                self._text(500, f"本地文件服务异常: {e}\n")
+            except Exception:
+                pass
+
+    def _proxy_to(self, raw_url, alist_path, head_only=False,
+                  cache_to=None, cache_key=None, cache_filename=None):
+        """转发请求到 raw_url。返回 True 表示已处理(无论成功失败),False 表示需要刷新 URL 重试
+
+        cache_to/cache_key/cache_filename:如果提供,边转发边把完整 body 存到本地 .ts 缓存
+        """
         try:
             req = urllib.request.Request(raw_url, method="GET")
             # 转发 Range 头(视频 seek 必需,HEAD 和 GET 都需要)
@@ -2767,20 +3480,38 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
                 self.end_headers()
 
-                # 流式转发 body
+                # 是否启用缓存:仅在有完整 body 且未用 Range 时缓存
+                do_cache = (
+                    cache_to is not None and cache_key and cache_filename
+                    and not self.headers.get("Range")
+                )
+
+                # 流式转发 body + 累积到缓存
                 total = 0
+                buf = bytearray() if do_cache else None
                 try:
                     while True:
                         chunk = upstream.read(CHUNK_SIZE)
                         if not chunk:
                             break
                         self.wfile.write(chunk)
+                        if do_cache:
+                            buf.extend(chunk)
                         total += len(chunk)
                 except BrokenPipeError:
                     log.info(f"  客户端断开,已转发 {total} 字节")
                 except ConnectionResetError:
                     log.info(f"  连接重置,已转发 {total} 字节")
                 log.info(f"  转发完成: {total} 字节")
+
+                # 异步存本地缓存(主线程不阻塞)
+                if do_cache and len(buf) > 100:
+                    save_key = f"{cache_key}/{cache_filename}"
+                    threading.Thread(
+                        target=cache_to.save, args=(save_key, bytes(buf)),
+                        daemon=True, name=f"cache-save-{cache_filename}"
+                    ).start()
+
                 return True
 
         except urllib.error.HTTPError as e:
@@ -3005,6 +3736,184 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             items.append({"name": name or path, "path": path, "virtual": True})
         self._json(200, {"code": 200, "message": "success", "data": items})
 
+    def _handle_api_cache_stats(self):
+        """本地 .ts 段缓存统计(GET /__api__/cache/stats)。
+        返回:总段数/总大小/磁盘用量/最近 N 个视频的缓存命中率。
+        """
+        if not TS_SEGMENT_CACHE:
+            self._json(200, {"code": 200, "message": "cache disabled",
+                             "data": {"enabled": False}})
+            return
+
+        base = TS_SEGMENT_CACHE.base_dir
+        total_segments = 0
+        total_bytes = 0
+        video_stats = {}  # cache_key -> {segments, bytes, last_write}
+        manifest_count = 0
+
+        try:
+            for entry in os.scandir(base):
+                if not entry.is_dir():
+                    continue
+                for sub in os.scandir(entry.path):
+                    if not sub.is_file():
+                        continue
+                    fname = sub.name
+                    fpath = sub.path
+                    try:
+                        sz = sub.stat().st_size
+                        mt = sub.stat().st_mtime
+                    except OSError:
+                        continue
+                    if fname.endswith(".manifest.json"):
+                        manifest_count += 1
+                        continue
+                    if fname.endswith(".meta"):
+                        continue
+                    # 段文件:hashed 路径,无法直接反推 cache_key
+                    # 但可以从 manifest 关联
+                    total_segments += 1
+                    total_bytes += sz
+        except Exception as e:
+            log.error(f"  扫描缓存目录失败: {e}")
+
+        # 从 manifest 聚合每个视频的缓存状态
+        try:
+            for entry in os.scandir(base):
+                if not entry.is_dir():
+                    continue
+                for sub in os.scandir(entry.path):
+                    if not sub.is_file() or not sub.name.endswith(".manifest.json"):
+                        continue
+                    try:
+                        with open(sub.path, "r", encoding="utf-8") as f:
+                            m = json.load(f)
+                        vkey = m.get("video_key", "")
+                        segments = m.get("segments", [])
+                        # 数这个 vkey 下有多少段文件(粗略:按 has 判断)
+                        cached = 0
+                        for s in segments:
+                            # 提取 .ts 文件名:URL 可能含 {hls/...} 里有真的 /,
+                            # 不能用 rsplit('/'). 要先去掉 query 再找最后一段
+                            path_only = s.split("?", 1)[0]
+                            sname = path_only.rsplit("/", 1)[-1]
+                            if sname and TS_SEGMENT_CACHE.has(f"{vkey}/{sname}"):
+                                cached += 1
+                        if vkey:
+                            # 从 vkey 反推 alist_path
+                            ap = vkey.rsplit("__tmpl__", 1)[0] if "__tmpl__" in vkey else vkey
+                            tmpl = vkey.rsplit("__tmpl__", 1)[1] if "__tmpl__" in vkey else "?"
+                            video_stats[vkey] = {
+                                "video_key": vkey,
+                                "alist_path": ap,
+                                "template": tmpl,
+                                "total_segments": len(segments),
+                                "cached_segments": cached,
+                                "hit_rate": round(cached / len(segments) * 100, 1) if segments else 0,
+                                "last_write": sub.stat().st_mtime,
+                            }
+                    except Exception:
+                        continue
+        except Exception as e:
+            log.debug(f"  解析 manifest 失败: {e}")
+
+        # 按最近写入时间排序,取 top 10
+        top_videos = sorted(video_stats.values(),
+                            key=lambda x: x.get("last_write", 0), reverse=True)[:10]
+        for v in top_videos:
+            v["last_write"] = time.strftime("%Y-%m-%d %H:%M:%S",
+                                            time.localtime(v["last_write"]))
+
+        # 当前播放的视频:超过 24 小时没心跳视为过期
+        current = None
+        with CURRENT_VIDEO_LOCK:
+            if CURRENT_VIDEO["registered_at"] > 0 and \
+               time.time() - CURRENT_VIDEO["registered_at"] < 86400:
+                current = dict(CURRENT_VIDEO)
+                current["registered_at"] = time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    time.localtime(current["registered_at"]))
+            else:
+                CURRENT_VIDEO.update({"cache_key": None, "registered_at": 0})
+
+        # 给 top_videos 标 is_current
+        if current and current["cache_key"]:
+            for v in top_videos:
+                if v.get("video_key") == current["cache_key"] or \
+                   v.get("alist_path") == current["alist_path"]:
+                    v["is_current"] = True
+                    break
+
+        # 磁盘用量
+        try:
+            disk_usage = shutil.disk_usage(base)
+            disk = {
+                "total_gb": round(disk_usage.total / 1024**3, 1),
+                "used_gb": round(disk_usage.used / 1024**3, 1),
+                "free_gb": round(disk_usage.free / 1024**3, 1),
+                "cache_gb": round(total_bytes / 1024**3, 2),
+            }
+        except Exception:
+            disk = {}
+
+        self._json(200, {
+            "code": 200,
+            "message": "success",
+            "data": {
+                "enabled": True,
+                "cache_dir": base,
+                "total_segments": total_segments,
+                "total_size_mb": round(total_bytes / 1024**2, 1),
+                "manifest_count": manifest_count,
+                "tracked_videos": len(video_stats),
+                "max_gb": LOCAL_CACHE_MAX_GB,
+                "disk": disk,
+                "top_videos": top_videos,
+                "current": current,  # 当前播放的视频(可空)
+            }
+        })
+
+    def _handle_api_cache_register(self):
+        """前端注册当前播放的视频(POST /__api__/cache/register)。
+        body: {cache_key, alist_path, template, total_segments}
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode("utf-8") if length else "{}"
+            data = json.loads(body)
+        except Exception as e:
+            self._json(400, {"code": 400, "message": f"bad body: {e}", "data": None})
+            return
+        with CURRENT_VIDEO_LOCK:
+            CURRENT_VIDEO.update({
+                "cache_key": data.get("cache_key") or "",
+                "alist_path": data.get("alist_path") or "",
+                "template": data.get("template") or "",
+                "total_segments": int(data.get("total_segments") or 0),
+                "registered_at": time.time(),
+            })
+        self._json(200, {"code": 200, "message": "registered", "data": None})
+
+    def _handle_api_debug_workers(self):
+        """调试:返回当前所有 worker 状态"""
+        workers_info = []
+        if CACHE_WORKER:
+            for vk, t in CACHE_WORKER._workers.items():
+                # 暴露 worker 的进度
+                w_state = CACHE_WORKER._worker_state.get(vk, {}) if hasattr(CACHE_WORKER, '_worker_state') else {}
+                workers_info.append({
+                    "video_key": vk,
+                    "alive": t.is_alive(),
+                    "name": t.name,
+                    "progress": w_state,
+                })
+        self._json(200, {"code": 200, "message": "ok",
+                         "data": {"workers": workers_info,
+                                  "current_vk": CURRENT_VIDEO.get("cache_key", ""),
+                                  "current_ts": CURRENT_VIDEO.get("registered_at", 0),
+                                  "LOCAL_CACHE_FULL_PREFETCH": LOCAL_CACHE_FULL_PREFETCH,
+                                  "CACHE_WORKER": CACHE_WORKER is not None}})
+
     # ---------- 目录浏览(纯文本,保留兼容) ----------
     def _handle_list(self, rel_path):
         alist_path = "/" + rel_path if rel_path else "/"
@@ -3141,6 +4050,8 @@ def main():
     log.info(f"  触发重建: POST http://localhost:{port}/__api__/index/start")
     log.info(f"  播放历史: http://localhost:{port}/__api__/history")
     log.info(f"  虚拟根目录: http://localhost:{port}/__api__/extra_roots")
+    log.info(f"  缓存统计: http://localhost:{port}/__api__/cache/stats")
+    log.info(f"  注册当前视频: POST http://localhost:{port}/__api__/cache/register")
     log.info(f"  健康检查: http://localhost:{port}/__health__")
     log.info(f"  按 Ctrl+C 停止")
     try:

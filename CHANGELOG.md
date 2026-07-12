@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-07-11
+
+### Fixed
+- **字幕黑底仍是无法通过 CSS 消除**(0.3.11/0.3.12 修复不彻底):诊断显示 ArtPlayer 字幕完全在 Chrome shadow DOM 中,`<track>` cue 是浏览器原生渲染,`::cue {}` / `::cue-region {}` / `::-webkit-media-text-track-container` 都不生效。最终方案:`setupCustomSubtitleRenderer` 完全接管:
+  - 设所有字幕轨 `mode='hidden'`(浏览器不渲染原 cue)
+  - `requestAnimationFrame` 轮询 `<video>.textTracks[*].activeCues`,读 cue 文本
+  - 自己维护一个 `<div id="__proxy_subtitle_overlay__">` 绝对定位覆盖在视频底部中
+  - 字幕渲染为内联 `<span>`,transparent bg + 文字阴影描边 + 白字
+  - 文字用 `textContent` + 转义防 XSS,换行保留
+
 ## [0.3.12] - 2026-07-11
 
 ### Fixed

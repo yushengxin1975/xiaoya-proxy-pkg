@@ -717,7 +717,7 @@ function buildSubtitlePanel(){
 
 // 等 <video> 出现就注入一次;hls.js 频繁重建 video,用 path 冷却避免风暴
 function watchVideoAndInject(){
-  if(document.querySelector('video')){tryInjectSubtitles();buildSubtitlePanel();}
+  if(document.querySelector('video')){tryInjectSubtitles();buildSubtitlePanel();setupCustomSubtitleRenderer();}
   const mo2=new MutationObserver(()=>{
     if(document.querySelector('video') && !watchVideoAndInject._t){
       watchVideoAndInject._t=setTimeout(()=>{
@@ -725,10 +725,66 @@ function watchVideoAndInject(){
         tryInjectSubtitles();
         // 视频重建时也重建面板(指向新 <video> 的 textTracks)
         buildSubtitlePanel();
+        setupCustomSubtitleRenderer();
       },500);
     }
   });
   mo2.observe(document.body,{childList:true,subtree:true});
+}
+
+// 自定义字幕渲染器:接管浏览器原生 <track> cue,自己用 DOM 画字幕
+// 解决 Chrome 默认 cue 区域黑色背景 + ::cue {} CSS 改不掉 shadow DOM 的 bug。
+// 策略:轮询 video.textTracks[*].activeCues,把每条 cue 文本渲染到一个固定定位 div。
+function setupCustomSubtitleRenderer(){
+  if(setupCustomSubtitleRenderer._installed)return;
+  setupCustomSubtitleRenderer._installed=true;
+  function ensureOverlay(){
+    let o=document.getElementById('__proxy_subtitle_overlay__');
+    if(o)return o;
+    o=document.createElement('div');
+    o.id='__proxy_subtitle_overlay__';
+    o.style.cssText='position:absolute;left:0;right:0;bottom:8%;z-index:2147483600;pointer-events:none;text-align:center;display:flex;justify-content:center;flex-direction:column;align-items:center;gap:2px;font:600 22px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;text-shadow:0 0 3px rgba(0,0,0,.95),0 0 6px rgba(0,0,0,.85);color:#fff;';
+    // 把 overlay 挂到 .art-video-player 上(优先),或 video,或 body
+    const host=document.querySelector('.art-video-player')||document.querySelector('.art-subtitle-show')||document.querySelector('video')||document.body;
+    if(host&&host!==document.body){
+      const cs=getComputedStyle(host);
+      if(cs.position==='static')host.style.position='relative';
+    }
+    (host||document.body).appendChild(o);
+    return o;
+  }
+  function tick(){
+    const v=document.querySelector('video');
+    if(v){
+      // 把所有字幕轨 mode 设为 hidden(浏览器不渲染,但 activeCues 还有),
+      // 这样原生黑底矩形消失,我们自己的 overlay 完全接管显示
+      for(let i=0;i<v.textTracks.length;i++){
+        const tt=v.textTracks[i];
+        if(tt.kind==='subtitles' && tt.mode==='showing'){
+          try{tt.mode='hidden';}catch(e){}
+        }
+      }
+      const o=ensureOverlay();
+      // 取所有字幕轨的 activeCues
+      let html='';
+      for(let i=0;i<v.textTracks.length;i++){
+        const tt=v.textTracks[i];
+        if(tt.kind!=='subtitles')continue;
+        const cues=tt.activeCues;
+        if(!cues)continue;
+        for(const c of cues){
+          // 用 textContent 防 XSS,简单保留换行
+          const txt=(c.text||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])).replace(/\r?\n/g,'<br/>');
+          html+='<span style="background:transparent !important;background-color:transparent !important;background-image:none !important;padding:2px 6px;display:inline-block;">'+txt+'</span>';
+        }
+      }
+      if(o.innerHTML!==html)o.innerHTML=html;
+    }
+    requestAnimationFrame(tick);
+  }
+  // 启动 RAF 循环
+  requestAnimationFrame(tick);
+  console.log('[proxy-fallback] 自定义字幕渲染器已启用');
 }
 // 字幕 cue 透明背景 + 加阴影避免亮场景看不清
 // 同时覆盖浏览器原生 cue 和 ArtPlayer 自己渲染的字幕层

@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.3.20] - 2026-07-11
+
+### Added
+- **本地 .ts 段缓存(播放中断容灾)**:代理在转发 .ts 时顺手把字节落地 `~/.cache/alist_proxy/ts_segments/`(按 sha256 分桶);upstream 失败(阿里云盘风控/转存被删/share 撤销)时自动回退本地,玩家无感无缝衔接
+  - `LocalSegmentCache` 类:key=`<alist_path>/<template_id>/<seg_filename>`,value=原始字节,meta=atime 用于 LRU
+  - `_proxy_to_with_local_cache` 替换普通 `_proxy_to` 用于 .ts:成功时落地,upstream 403 时查本地
+  - `_serve_ts_from_local` 完全不走 upstream(保证上游死透仍能播已下载段)
+  - LRU 策略:超过 `LOCAL_CACHE_MAX_GB`(默认 200GB) 按 atime 淘汰最旧,降到 90% 停止
+  - 配置:`LOCAL_CACHE_ENABLED`(默认 true)/`LOCAL_CACHE_DIR`/`LOCAL_CACHE_MAX_GB`
+  - 端点 `GET /__api__/local_cache/status` 返回用量、启用情况
+  - 响应头 `X-Local-Cache: 1` 表示该段来自本地,便于未来 debug
+
 ## [0.3.19] - 2026-07-11
 
 ### Fixed

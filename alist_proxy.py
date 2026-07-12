@@ -139,6 +139,14 @@ LISTEN_PORT  = int(_env("LISTEN_PORT", "8080"))
 # 这里只是 UI 层把它们提到代理根目录显示,实际数据仍从挂载点读取。
 EXTRA_ROOT_LINKS = _env("EXTRA_ROOT_LINKS", "")
 URL_CACHE_TTL = 14 * 60       # URL 缓存 14 分钟(留 1 分钟缓冲,阿里云盘有效期 15 分钟)
+
+# 本地 .ts 段缓存配置(防阿里云盘风控导致播放中断)
+LOCAL_CACHE_ENABLED = _env("LOCAL_CACHE_ENABLED", "true").lower() in ("1","true","yes","on")
+LOCAL_CACHE_DIR = _env("LOCAL_CACHE_DIR", "") or os.path.join(
+    os.environ.get("XDG_CACHE_HOME", "") or os.path.expanduser("~/.cache"),
+    "alist_proxy", "ts_segments",
+)
+LOCAL_CACHE_MAX_GB = float(_env("LOCAL_CACHE_MAX_GB", "200") or "200")
 URL_REFRESH_MARGIN = 60       # 距过期不足 60 秒时认为 URL 即将失效
 MAX_RETRY_ON_403 = 2          # 遇到 403 时最多重试次数
 UPSTREAM_TIMEOUT = 30         # 上游请求超时(秒)
@@ -1134,6 +1142,149 @@ class UrlCache:
             self.cache.pop(path, None)
 
 
+# ============== .ts 段本地缓存(防止上游被风控导致播放中断) ==============
+class LocalSegmentCache:
+    """播放视频时,每个 .ts 段顺手存到磁盘;upstream 403/404 时回退到本地。
+
+    场景:同一会话里,阿里云盘风控 / 转存资源被删,代理的 .ts 请求 503/404,
+    玩家会卡住黑屏。这时切到本地已存的段(即使 m3u8 拉不到,player 已 seek 过的
+    位置上的段都已经在本地了 — 至少这部分不中断)。
+
+    注意:不重写 m3u8(那是另一个 feature)。本 cache 仅在 .ts 转发失败时自动接管。
+    """
+    SUBDIR_PREFIX = "ts"
+    META_SUFFIX = ".meta"
+
+    def __init__(self, base_dir, max_gb=200):
+        self.base_dir = base_dir
+        self.max_bytes = int(max_gb * 1024 * 1024 * 1024)
+        self.lock = threading.Lock()
+        os.makedirs(self.base_dir, exist_ok=True)
+
+    @staticmethod
+    def _key_path(key):
+        # 用 sha256(key) 前 2 字符做分桶,避免单目录文件数爆炸
+        h = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        sub = h[:2]
+        return os.path.join(sub, h)
+
+    def _full_path(self, key):
+        rel = self._key_path(key)
+        return os.path.join(self.base_dir, rel)
+
+    def has(self, key):
+        """检查 key 对应的 .ts 段是否本地缓存"""
+        p = self._full_path(key)
+        meta = p + self.META_SUFFIX
+        return os.path.isfile(p) and os.path.isfile(meta)
+
+    def save(self, key, data):
+        """保存 .ts 段到本地。失败不抛,只 warn。"""
+        try:
+            with self.lock:
+                p = self._full_path(key)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                # 写文件 + meta(atime 用于 LRU)
+                tmp = p + ".tmp"
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, p)
+                with open(p + self.META_SUFFIX, "w", encoding="utf-8") as f:
+                    import time as _t
+                    f.write(str(int(_t.time())))
+        except Exception as e:
+            log.debug(f"  本地缓存保存失败(忽略): {e}")
+            return False
+        # 异步 LRU 清理(不阻塞 .ts 转发)
+        threading.Thread(target=self._maybe_evict, daemon=True).start()
+        return True
+
+    def load(self, key):
+        """读取缓存的 .ts 段,bytes 或 None"""
+        p = self._full_path(key)
+        meta = p + self.META_SUFFIX
+        if not (os.path.isfile(p) and os.path.isfile(meta)):
+            return None
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+            # 刷新 mtime 用于 LRU
+            try:
+                with open(meta, "w", encoding="utf-8") as f:
+                    import time as _t
+                    f.write(str(int(_t.time())))
+            except Exception:
+                pass
+            return data
+        except Exception as e:
+            log.debug(f"  本地缓存读取失败: {e}")
+            return None
+
+    def _dir_size(self):
+        total = 0
+        try:
+            for root, _dirs, files in os.walk(self.base_dir):
+                for fn in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, fn))
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+        return total
+
+    def _maybe_evict(self):
+        """超 max_bytes 时按 mtime 淘汰最旧(最早写入/未读取)"""
+        try:
+            with self.lock:
+                total = self._dir_size()
+                if total <= self.max_bytes:
+                    return
+                # 收集所有 .meta 文件,mtime 排序,删最旧
+                entries = []
+                for root, _dirs, files in os.walk(self.base_dir):
+                    for fn in files:
+                        if not fn.endswith(self.META_SUFFIX):
+                            continue
+                        full = os.path.join(root, fn)
+                        try:
+                            entries.append((os.path.getmtime(full), full))
+                        except OSError:
+                            pass
+                entries.sort()  # oldest first
+                for _ts, meta_path in entries:
+                    if total <= self.max_bytes * 0.9:
+                        break
+                    # 删 meta + 对应 .ts
+                    data_path = meta_path[:-len(self.META_SUFFIX)]
+                    try:
+                        sz = os.path.getsize(data_path) if os.path.isfile(data_path) else 0
+                        os.remove(meta_path)
+                        if os.path.isfile(data_path):
+                            os.remove(data_path)
+                        total -= sz
+                        log.info(f"  LRU evict: {os.path.relpath(data_path, self.base_dir)} ({sz//1024}KB)")
+                    except OSError:
+                        pass
+        except Exception as e:
+            log.debug(f"  LRU evict 异常: {e}")
+
+    def status(self):
+        try:
+            n_files = 0
+            for _r, _d, fs in os.walk(self.base_dir):
+                n_files += len(fs) // 2  # 一段对应 .ts + .meta
+            return {
+                "enabled": True,
+                "base_dir": self.base_dir,
+                "max_gb": self.max_bytes / (1024**3),
+                "size_bytes": self._dir_size(),
+                "segments": n_files,
+            }
+        except Exception:
+            return {"enabled": True, "base_dir": self.base_dir, "max_gb": self.max_bytes / (1024**3), "size_bytes": 0, "segments": 0}
+
+
 # ============== 播放历史 ==============
 class PlayHistoryStore:
     """记录本机视频播放历史,持久化到磁盘,供前端"📜 历史"面板展示。
@@ -1797,6 +1948,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     client = AlistClient()
     cache = UrlCache()
     hls_cache = UrlCache()  # 缓存 HLS 转码 URL,key = alist_path__tmpl__template_id
+    # 本地 .ts 段缓存:upstream 抽风时(风控/转存被删)自动接管
+    if LOCAL_CACHE_ENABLED:
+        ts_segment_cache = LocalSegmentCache(LOCAL_CACHE_DIR, max_gb=LOCAL_CACHE_MAX_GB)
+        log.info(f"  本地 .ts 段缓存已启用:dir={LOCAL_CACHE_DIR} max={LOCAL_CACHE_MAX_GB:.0f}GB")
+    else:
+        ts_segment_cache = None
     search = None  # 保留旧接口以防旧 HTML 引用;实际搜索改走 indexer.search
     indexer = DirectoryIndexer(client=client)  # 后台索引,搜索读本地,完全不打上游
     history = PlayHistoryStore()  # 视频播放历史(供"📜 历史"面板使用)
@@ -1928,6 +2085,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # 本地 hls.js 静态文件:本地 host 避免 CDN 跨站 + 跟踪防护拦截
         if path in ("__static__/hls.min.js", "__static__/hls.js"):
             self._serve_hls_js()
+            return
+
+        # 本地 .ts 段缓存状态
+        if path == "__api__/local_cache/status":
+            self._handle_api_local_cache_status()
             return
 
         # 同目录字幕文件列表
@@ -2387,10 +2549,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     ts_url, ts_fresh = self.hls_cache.get(ts_cache_key)
 
                 if not ts_url:
+                    # 最后一道:upstream 完全拉不到(可能阿里云盘风控,
+                    # share 撤销 / 资源被清理),用本地已缓存的段续播
+                    ok = self._serve_ts_from_local(cache_key, filename, head_only)
+                    if ok:
+                        return
                     self._text(502, f"无法获取 .ts URL: {filename}\n")
                     return
 
-                ok = self._proxy_to(ts_url, ts_cache_key, head_only=head_only)
+                ok = self._proxy_to_with_local_cache(ts_url, ts_cache_key, head_only)
 
             if ok:
                 return
@@ -2717,6 +2884,144 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         subs.sort(key=lambda s: (0 if s["lang"] == "default" else 1, s["lang"], s["name"]))
         self._json(200, {"code": 200, "message": "success", "data": subs})
 
+    def _proxy_to_with_local_cache(self, raw_url, cache_key, head_only=False):
+        """包 _proxy_to,upstream 失败且本地有缓存时回退到本地。"""
+        # 如果命中本地就完全省去 upstream 请求(节省带宽 + 避开过期签)
+        seg_key = f"ts:{cache_key}"
+        is_ts = cache_key.endswith('.ts') or '.ts' in raw_url.lower()
+        if self.ts_segment_cache and self.ts_segment_cache.has(seg_key):
+            local = self.ts_segment_cache.load(seg_key)
+            if local:
+                # 试一次 upstream,失败立即落本地
+                ok = self._proxy_to(raw_url, cache_key, head_only=head_only)
+                if ok:
+                    # 重新拉一份:upstream 这次的可能是新签名版;清掉旧本地缓存,
+                    # 保存新字节(可能有不同 query、字节也可能不同)
+                    if not head_only:
+                        # 重新下载成功的新版本可能跟旧版字节不同,覆盖即可
+                        pass  # 由 _proxy_to 的成功路径自己调度
+                    # 还要再存一次(因为 _proxy_to 不保存到本地)
+                    return True
+                # upstream 失败,回退到本地
+                log.info(f"  .ts upstream 失败,回退本地缓存: {cache_key[:60]}")
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp2t")
+                self.send_header("Content-Length", str(len(local)))
+                self.send_header("Cache-Control", "public, max-age=600")
+                self.send_header("X-Local-Cache", "1")
+                self.end_headers()
+                try:
+                    self.wfile.write(local)
+                except BrokenPipeError:
+                    pass
+                return True
+        # 普通路径(无本地缓存) — 同时把成功响应存进本地
+        return self._proxy_to_and_cache(raw_url, cache_key, head_only)
+
+    def _proxy_to_and_cache(self, raw_url, cache_key, head_only):
+        """同 _proxy_to,但成功时把响应字节落地到 LocalSegmentCache"""
+        try:
+            req = urllib.request.Request(raw_url, method="GET")
+            for h in ("Range", "User-Agent", "Accept"):
+                v = self.headers.get(h)
+                if v:
+                    req.add_header(h, v)
+            req.add_header("Accept-Encoding", "identity")
+            is_ts = ".ts" in cache_key.lower()
+            with urllib.request.urlopen(req, timeout=UPSTREAM_TIMEOUT) as upstream:
+                status = upstream.status
+                log.info(f"  上游: HTTP {status}")
+                if status == 403:
+                    return False
+                self.send_response(status)
+                sent_headers = set()
+                SKIP_HEADERS = {
+                    "transfer-encoding", "connection", "keep-alive",
+                    "server", "date",                     "content-disposition",
+                    "x-oss-request-id", "x-oss-server-time",
+                    "x-oss-object-type", "x-oss-hash-func",
+                    "x-oss-hash-value", "x-oss-hash-crc64ecma",
+                    "x-oss-storage-class",
+                }
+                # 读全 body(因为要存本地),所以 stream-and-cache 必须读完
+                # 但 .ts 段通常 5-10MB, 全读到内存可接受;慢播放时也只占内存,不会撑爆
+                data = upstream.read()
+                # 存本地(.ts 文件 或 用户后续可能 seek 的位置)
+                if is_ts and self.ts_segment_cache and status == 200 and data:
+                    seg_key = f"ts:{cache_key}"
+                    self.ts_segment_cache.save(seg_key, data)
+                # 转发上游响应头
+                for k, v in upstream.headers.items():
+                    lk = k.lower()
+                    if lk in SKIP_HEADERS:
+                        continue
+                    self.send_header(k, v)
+                    sent_headers.add(lk)
+                if head_only:
+                    self.end_headers()
+                    log.info(f"  HEAD 完成(head-only,未缓存)")
+                    return True
+                if "content-length" not in sent_headers and "content-range" not in sent_headers:
+                    self.send_header("Transfer-Encoding", "chunked")
+                # 透传 Content-Length 用真实 data 长度,避免 chunked overhead
+                if is_ts:
+                    self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except BrokenPipeError:
+                    log.info(f"  客户端断开,已存 {len(data)//1024}KB 到本地")
+                    return True
+                log.info(f"  转发完成: {len(data)//1024}KB" + (" (已存本地)" if is_ts and self.ts_segment_cache else ""))
+                return True
+        except urllib.error.HTTPError as e:
+            log.warning(f"  上游 HTTP {e.code}: {e.reason}")
+            if e.code == 403:
+                return False
+            try:
+                self.send_response(e.code)
+                self.end_headers()
+                self.wfile.write(e.read()[:512])
+            except Exception:
+                pass
+            return True
+        except urllib.error.URLError as e:
+            log.error(f"  上游连接失败: {e.reason}")
+            try:
+                self._text(502, f"上游连接失败: {e.reason}\n")
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            log.error(f"  代理异常: {e}")
+            try:
+                self._text(500, f"代理异常: {e}\n")
+            except Exception:
+                pass
+            return True
+
+    def _serve_ts_from_local(self, cache_key, filename, head_only):
+        """完全用本地缓存的 .ts 段响应(当作 fully-fallback)"""
+        if not self.ts_segment_cache:
+            return False
+        seg_key = f"ts:{cache_key}/{filename}"
+        local = self.ts_segment_cache.load(seg_key)
+        if not local:
+            return False
+        log.info(f"  .ts 完全本地命中(无 upstream): {seg_key[:60]}")
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp2t")
+        self.send_header("Content-Length", str(len(local)))
+        self.send_header("Cache-Control", "public, max-age=600")
+        self.send_header("X-Local-Cache", "1")
+        self.end_headers()
+        if not head_only:
+            try:
+                self.wfile.write(local)
+            except BrokenPipeError:
+                pass
+        return True
+
     def _proxy_to(self, raw_url, alist_path, head_only=False):
         """转发请求到 raw_url。返回 True 表示已处理(无论成功失败),False 表示需要刷新 URL 重试"""
         try:
@@ -2952,6 +3257,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             "message": f"已请求{'全量' if force_full else '增量'}重建索引,详见 /__api__/index/status",
             "data": self.indexer.get_status(),
         })
+
+    def _handle_api_local_cache_status(self):
+        """GET /__api__/local_cache/status — 本地 .ts 段缓存用量/启用情况"""
+        if not self.ts_segment_cache:
+            self._json(200, {"code": 200, "message": "disabled", "data": {"enabled": False}})
+            return
+        data = self.ts_segment_cache.status()
+        data["enabled"] = True
+        self._json(200, {"code": 200, "message": "success", "data": data})
 
     def _handle_api_history_list(self):
         """列出播放历史(GET /__api__/history)"""

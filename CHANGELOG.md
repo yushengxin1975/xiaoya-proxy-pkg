@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-07-11
+
+### Fixed
+- **MutationObserver 死循环导致页面卡死**(0.3.11 引入):监听 `attributes: true + subtree: true` + `attributeFilter: ['style', 'class']` 时,ArtPlayer 字幕每 ~200ms 改一次 inline style,触发回调里 setProperty 又被 ArtPlayer 覆盖回去,死循环把浏览器卡死。改为只监听 `childList` — 新字幕节点挂载时清一次,后续 inline style 更新由外部 CSS `!important` 接管
+
 ## [0.3.11] - 2026-07-11
 
 ### Fixed

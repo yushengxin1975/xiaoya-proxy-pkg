@@ -779,26 +779,26 @@ function watchVideoAndInject(){
   stripAllArtSubtitle();
   let cnt=0;
   const iv=setInterval(()=>{stripAllArtSubtitle();if(++cnt>20)clearInterval(iv);},1500);
-  // MutationObserver 侦听新字幕元素挂载/属性变化
+  // MutationObserver 只听 childList(新字幕节点挂载)。绝不开 attributes + subtree,
+  // 否则 ArtPlayer 每 200ms 改一次字幕 inline style,触发回调再 setProperty 死循环把页面卡死
   try{
     const mo=new MutationObserver(muts=>{
-      let need=false;
       for(const m of muts){
-        if(m.type==='attributes' && m.target && /art-subtitle/i.test(m.target.className||'')){stripInlineBg(m.target);need=true;continue;}
+        if(m.type!=='childList')continue;
         for(const n of m.addedNodes){
-          if(n.nodeType===1 && /art-subtitle/i.test(n.className||'')){stripInlineBg(n);need=true;}
+          if(n.nodeType!==1)continue;
+          if(/art-subtitle/i.test(n.className||''))stripInlineBg(n);
           if(n.querySelectorAll){
             try{
-              n.querySelectorAll('[class*="art-subtitle"]').forEach(x=>{stripInlineBg(x);need=true;});
+              n.querySelectorAll('[class*="art-subtitle"]').forEach(stripInlineBg);
             }catch(e){}
           }
         }
       }
     });
-    // 监听 body 全树,新元素挂上来立刻处理
     (document.body||document.documentElement)&&mo.observe(document.body||document.documentElement,{
-      childList:true,subtree:true,attributes:true,
-      attributeFilter:['style','class']
+      childList:true,
+      subtree:true
     });
   }catch(e){console.warn('[proxy-fallback] MO 初始化失败',e);}
 })();

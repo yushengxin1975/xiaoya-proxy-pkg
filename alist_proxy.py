@@ -2763,6 +2763,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if token:
             html = html.replace(b"__ALIST_TOKEN__", token.encode("utf-8"))
             log.info(f"  注入 token 到简易网页(长度 {len(token)})")
+        # 注入上游地址:取 host (例如 http://47.116.180.30:5678 → 47.116.180.30:5678)
+        try:
+            upstream = ALIST_URL or ""
+            host_part = upstream.split("://", 1)[-1].rstrip("/")
+            html = html.replace(b"__ALIST_UPSTREAM__", host_part.encode("utf-8"))
+        except Exception:
+            html = html.replace(b"__ALIST_UPSTREAM__", b"")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(html)))

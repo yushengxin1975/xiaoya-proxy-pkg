@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-07-11
+
+### Fixed
+- **自定义字幕 overlay 把进度条挡住了**:`position:absolute; bottom: 8%` 正好压在 ArtPlayer 进度条的高度上,而且参与父容器布局让父布局错位。改为:
+  - `position: fixed` — 完全脱离布局流,不挤压任何兄弟节点
+  - `bottom: 18%` — 抬到进度条上方,够留给"播放/暂停/时长"控件
+  - 显式 `background: transparent; box-shadow: none`
+
 ## [0.3.13] - 2026-07-11
 
 ### Fixed

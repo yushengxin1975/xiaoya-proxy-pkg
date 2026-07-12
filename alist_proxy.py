@@ -743,7 +743,9 @@ function setupCustomSubtitleRenderer(){
     if(o)return o;
     o=document.createElement('div');
     o.id='__proxy_subtitle_overlay__';
-    o.style.cssText='position:absolute;left:0;right:0;bottom:8%;z-index:2147483600;pointer-events:none;text-align:center;display:flex;justify-content:center;flex-direction:column;align-items:center;gap:2px;font:600 22px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;text-shadow:0 0 3px rgba(0,0,0,.95),0 0 6px rgba(0,0,0,.85);color:#fff;';
+    // position:fixed 不参与任何父容器布局(进度条 / 控制条位置不受影响)
+    // bottom:18% 抬到进度条上方,留出足够空间;同时 z-index 顶到最高
+    o.style.cssText='position:fixed;left:0;right:0;bottom:18%;z-index:2147483600;pointer-events:none;text-align:center;display:flex;justify-content:center;flex-direction:column;align-items:center;gap:2px;font:600 22px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;text-shadow:0 0 3px rgba(0,0,0,.95),0 0 6px rgba(0,0,0,.85);color:#fff;background:transparent;box-shadow:none;';
     // 把 overlay 挂到 .art-video-player 上(优先),或 video,或 body
     const host=document.querySelector('.art-video-player')||document.querySelector('.art-subtitle-show')||document.querySelector('video')||document.body;
     if(host&&host!==document.body){

@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-07-11
+
+### Fixed
+- **字幕仍有黑底**(诊断:ArtPlayer 用 `.art-subtitle` DOM 渲染,WebVTT STYLE 块只对浏览器原生 `<track>` 生效,inline style 比 CSS 优先级高):
+  - CSS 用 `html body [class*="art-subtitle"]` 顶 specificity
+  - MutationObserver 监听 `body` subtree:`attributes` filter 包含 `style` / `class`,所有 `.art-subtitle*` 元素属性变化/挂载立刻 `style.setProperty('background','transparent','important')` 改 inline
+  - 首次 + 每 1.5s 兜底扫 20 次,覆盖 ArtPlayer 用 rAF 重渲染不触发 DOM mutation 的边界
+
 ## [0.3.10] - 2026-07-11
 
 ### Added

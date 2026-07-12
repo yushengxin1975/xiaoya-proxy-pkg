@@ -735,31 +735,72 @@ function watchVideoAndInject(){
 // 用 * 选择器覆盖字幕容器的所有子元素,防止某些 ArtPlayer 版本
 // 给行级元素套背景。
 (function injectSubCss(){
-  const css=`
-    /* 浏览器原生 <track> cue — 关掉默认黑底,只保留文字阴影描边 */
-    video::cue {
-      background-color: transparent !important;
-      background: transparent !important;
-      text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7) !important;
-      color: #fff !important;
-    }
-    /* ArtPlayer 字幕层(主容器 + 所有子元素,避免行级盒子的背景) */
-    .art-subtitle, .art-subtitle *,
-    .art-subtitle-line, .art-subtitle-box,
-    .art-subtitle-wrap, .art-subtitle-mask,
-    [class*="art-subtitle"] {
+  // 1) 注入样式表:CSS !important 对外部/用户态样式有效
+  const styleId='__proxy_sub_css';
+  let s=document.getElementById(styleId);
+  if(!s){s=document.createElement('style');s.id=styleId;document.head.appendChild(s);}
+  s.textContent=`
+    /* 浏览器原生 <track> cue */
+    video::cue, video::-webkit-media-text-track-container {
       background-color: transparent !important;
       background: transparent !important;
       background-image: none !important;
+      text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7) !important;
+      color: #fff !important;
     }
-    .art-subtitle, .art-subtitle-line, .art-subtitle-box {
-      text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7);
-      color: #fff;
+    /* ArtPlayer 字幕 DOM — 用 html body 前缀顶 specificity */
+    html body [class*="art-subtitle"],
+    html body [class*="art-subtitle"] * {
+      background: transparent !important;
+      background-color: transparent !important;
+      background-image: none !important;
+      text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7) !important;
+      color: #fff !important;
     }
   `;
-  let s=document.getElementById('__proxy_sub_css');
-  if(!s){s=document.createElement('style');s.id='__proxy_sub_css';document.head.appendChild(s);}
-  s.textContent=css;
+  // 2) ArtPlayer 用 inline style 写 background-color,CSS 压不住。
+  // 用 setProperty('important') 改 inline,优先级最高;MutationObserver 盯着
+  // 字幕容器,新元素一出现立刻清背景,不会被后续重渲染覆盖。
+  function stripInlineBg(el){
+    if(!el||el.nodeType!==1)return;
+    try{
+      el.style.setProperty('background','transparent','important');
+      el.style.setProperty('background-color','transparent','important');
+      el.style.setProperty('background-image','none','important');
+    }catch(e){}
+  }
+  function stripAllArtSubtitle(){
+    document.querySelectorAll('[class*="art-subtitle"]').forEach(el=>{
+      stripInlineBg(el);
+      try{el.querySelectorAll('*').forEach(stripInlineBg);}catch(e){}
+    });
+  }
+  // 首次 + 每 1.5s 扫一次(兜底 ArtPlayer 用 requestAnimationFrame 重渲染不触发 DOM mutation 的边界情况)
+  stripAllArtSubtitle();
+  let cnt=0;
+  const iv=setInterval(()=>{stripAllArtSubtitle();if(++cnt>20)clearInterval(iv);},1500);
+  // MutationObserver 侦听新字幕元素挂载/属性变化
+  try{
+    const mo=new MutationObserver(muts=>{
+      let need=false;
+      for(const m of muts){
+        if(m.type==='attributes' && m.target && /art-subtitle/i.test(m.target.className||'')){stripInlineBg(m.target);need=true;continue;}
+        for(const n of m.addedNodes){
+          if(n.nodeType===1 && /art-subtitle/i.test(n.className||'')){stripInlineBg(n);need=true;}
+          if(n.querySelectorAll){
+            try{
+              n.querySelectorAll('[class*="art-subtitle"]').forEach(x=>{stripInlineBg(x);need=true;});
+            }catch(e){}
+          }
+        }
+      }
+    });
+    // 监听 body 全树,新元素挂上来立刻处理
+    (document.body||document.documentElement)&&mo.observe(document.body||document.documentElement,{
+      childList:true,subtree:true,attributes:true,
+      attributeFilter:['style','class']
+    });
+  }catch(e){console.warn('[proxy-fallback] MO 初始化失败',e);}
 })();
 console.log('[proxy-fallback] subtitle injector installed');
 if(document.body){watchVideoAndInject();}

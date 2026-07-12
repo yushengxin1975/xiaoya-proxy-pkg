@@ -692,84 +692,53 @@ function watchVideoAndInject(){
 // 用 * 选择器覆盖字幕容器的所有子元素,防止某些 ArtPlayer 版本
 // 给行级元素套背景。
 (function injectSubCss(){
-  // 1) 注入最强样式表(默认 background 透明 + 文字阴影描边)
+  // 注入样式表:用 [id=...] 高特异性选择器让优先级高于 ArtPlayer 内部 inline style
   const styleId='__proxy_sub_css';
   let s=document.getElementById(styleId);
   if(!s){s=document.createElement('style');s.id=styleId;document.head.appendChild(s);}
-  // 用 html body 前缀把 specificity 顶到 020,0,1,0 级别(高于内联 attribute selector 但仍低于 inline style)
-  // JS setProperty('important') 才会最终盖掉 inline style
-  s.textContent=`
-    /* 1. 浏览器原生 <track> 渲染:CSS 只能改 ::cue / ::cue-region,WebKit 私有伪元素覆盖 */
-    html body video::cue,
-    html body video::-webkit-media-text-track-container,
-    html body video::-webkit-media-text-track-display,
-    html body video::cue-region {
-      background: transparent !important;
+  const css=`
+    /* 浏览器原生 <track> cue */
+    video::cue, video::-webkit-media-text-track-container {
       background-color: transparent !important;
+      background: transparent !important;
       background-image: none !important;
       text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7) !important;
       color: #fff !important;
     }
-    /* 2. ArtPlayer 所有可能的字幕容器:类名多变,通配 + 子元素全打 */
-    html body [class*="art-subtitle"],
-    html body [class*="art-subtitle"] *,
-    html body [class*="subtitle-"] {
-      background: transparent !important;
+    /* ArtPlayer 字幕层 — 类名多变,把所有 art-subtitle* 都打透明 */
+    [class*="art-subtitle"], [class*="art-subtitle"] * {
       background-color: transparent !important;
+      background: transparent !important;
       background-image: none !important;
       text-shadow: 0 0 2px rgba(0,0,0,.95), 0 0 4px rgba(0,0,0,.7) !important;
     }
-  `;
-  // 2) 对所有匹配元素强制改 inline style(优先级最高,即使 specificity 也盖不住都无所谓)
-  // 用 MutationObserver 实时跟进新增节点;ArtPlayer 在字幕更新时会重渲染 DOM
-  function stripInlineBg(el){
-    if(!el||el.nodeType!==1)return;
-    try{
-      el.style.setProperty('background','transparent','important');
-      el.style.setProperty('background-color','transparent','important');
-      el.style.setProperty('background-image','none','important');
-      // 顺便清掉 background / boxShadow 给文字容器
-      // 注意:别动 border / padding
-    }catch(e){}
-  }
-  function stripAll(){
-    // 节点层
-    document.querySelectorAll('[class*="art-subtitle"]').forEach(el=>{
-      stripInlineBg(el);
-      // 子元素也清
-      el.querySelectorAll('*').forEach(stripInlineBg);
-    });
-    // 浏览器原生 cue 容器(WebKit 私有)
-    const vids=document.querySelectorAll('video');
-    vids.forEach(v=>{
-      // 遍历 shadow DOM 拿 text-track container
-      try{
-        v.textTracks && Array.from(v.textTracks).forEach(tt=>{
-          // ::cue 改不了 inline;靠上面的 CSS,这里只是 sanity check
-        });
-      }catch(e){}
-    });
-  }
-  // 首次跑一遍,把已有的清掉
-  stripAll();
-  // 监听 DOM 变化,ArtPlayer 重新渲染字幕时立即覆盖
-  const mo=new MutationObserver(muts=>{
-    let need=false;
-    for(const m of muts){
-      for(const n of m.addedNodes){
-        if(n.nodeType===1 && /art-subtitle|subtitle-/i.test(n.className||'') ){need=true;break;}
-        if(n.querySelectorAll){
-          try{if(n.querySelectorAll('[class*="art-subtitle"]').length)need=true;}catch(e){}
-        }
-      }
-      if(need)break;
+    /* H5 自定义 <video>::cue 也行 */
+    video::cue-region, video::cue {
+      background: transparent !important;
+      background-color: transparent !important;
     }
-    if(need)stripAll();
-  });
-  mo.observe(document.body||document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['style','class']});
-  // 也周期扫一次兜底(防止 attribute mutation 漏掉)
+  `;
+  s.textContent=css;
+  // 高频巡检:ArtPlayer 字幕节点可能是动态创建,样式表覆盖不到由 JS 注入的内联样式
+  // 强制把可能含背景的元素 inline style 改了
+  function stripBg(){
+    const sels=['[class*="art-subtitle"]'];
+    for(const sel of sels){
+      document.querySelectorAll(sel).forEach(el=>{
+        try{
+          el.style.setProperty('background','transparent','important');
+          el.style.setProperty('background-color','transparent','important');
+          el.style.setProperty('background-image','none','important');
+        }catch(e){}
+      });
+    }
+  }
+  // 立即 + 0.2s + 1s + 每 1s 持续 30s(覆盖视频初始化各阶段)
+  stripBg();
+  setTimeout(stripBg,200);
+  setTimeout(stripBg,1000);
   let n=0;
-  const iv=setInterval(()=>{stripAll();if(++n>60)clearInterval(iv);},1000);
+  const iv=setInterval(()=>{stripBg();if(++n>30)clearInterval(iv);},1000);
 })();
 console.log('[proxy-fallback] subtitle injector installed');
 if(document.body){watchVideoAndInject();}

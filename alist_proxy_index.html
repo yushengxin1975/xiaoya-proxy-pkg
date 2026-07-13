@@ -134,6 +134,16 @@
     .item.video { border-left: 3px solid #4fc3f7; cursor: pointer; }
     .item.video .icon { color: #4fc3f7; }
     .item.video:hover .name { color: #4fc3f7; }
+    /* 视频项右侧"播放"按钮(在卡片里加一个 dropdown 触发器) */
+    .item .play-menu {
+      position:absolute;right:12px;top:50%;transform:translateY(-50%);
+      padding:5px 10px;background:rgba(79,195,247,0.15);color:#4fc3f7;
+      border:1px solid #2a3540;border-radius:4px;cursor:pointer;
+      font-size:12px;font-weight:600;opacity:0;transition:opacity 0.15s;
+      user-select:none;
+    }
+    .item:hover .play-menu{opacity:1;}
+    .item .play-menu:hover{background:rgba(79,195,247,0.3);}
     .item.dir { border-left: 3px solid #ffa726; }
     .item.dir .icon { color: #ffa726; }
     .item.new {
@@ -839,6 +849,10 @@
         html += `<span class="icon">${iconFor(it)}</span>`;
         html += `<span class="info"><div class="name">${escapeHtml(it.name)}</div>`;
         html += `<div class="meta">${meta}</div></span>`;
+        // 视频文件:加 "▶ PotPlayer" 按钮(点击直接唤起 PotPlayer)
+        if(!it.is_dir && isVideo(it.name)){
+          html += `<span class="play-menu" data-full="${escapeHtml(full)}" onclick="event.preventDefault();event.stopPropagation();">▶ PotPlayer</span>`;
+        }
         html += `</a>`;
         if (isVirtual) hadVirtual = true;
         lastWasVirtual = isVirtual;
@@ -877,6 +891,57 @@
       recordPlay(videoPath);   // 兜底记录:即便用户拦了弹窗或后端没拦截住,也会留下足迹
       window.open(alistPlayUrl, "_blank");
     }
+
+    // 第三方播放器支持(从 /__api__/player_info 拉)
+    let PLAYER_INFO = null;
+    function loadPlayerInfo(){
+      return fetch('/__api__/player_info').then(r=>r.json()).then(j=>{
+        PLAYER_INFO = (j && j.data) || {players:[], listen_host:'localhost', listen_port:8080};
+      }).catch(()=>{PLAYER_INFO={players:[], listen_host:'localhost', listen_port:8080};});
+    }
+    loadPlayerInfo();
+
+    // 计算 m3u8 URL(本地 IP+port,这样第三方播放器能跨同台电脑访问)
+    function m3u8UrlFor(videoPath, tmpl){
+      const host = (PLAYER_INFO && PLAYER_INFO.listen_host) || location.hostname;
+      const port = (PLAYER_INFO && PLAYER_INFO.listen_port) || (location.port || 80);
+      return `${location.protocol}//${host}:${port}/__hls__/${encodeURIComponent(videoPath + '__tmpl__' + tmpl)}/media.m3u8`;
+    }
+
+    // 直接唤起 PotPlayer(用 /d/ 走 Alist 原始流,PotPlayer 能识别成单文件并显示文件名)
+    function launchInPotPlayer(btn){
+      console.log('[play] launchInPotPlayer 触发', btn.dataset.full);
+      const full = btn.dataset.full;
+      if(!full){console.warn('[play] 没有 data-full');return;}
+      const pls=(PLAYER_INFO && PLAYER_INFO.players) || [];
+      const pick = pls.find(p=>p.proto==='potplayer') || pls.find(p=>p.proto==='vlc') || pls[0];
+      // 用 /d/ 路径(代理 302 到 Alist raw_url = 阿里云盘直链)
+      // 比起 m3u8,PotPlayer 会显示文件名"xxx.mkv"而不是 URL
+      const host = (PLAYER_INFO && PLAYER_INFO.listen_host) || location.hostname;
+      const port = (PLAYER_INFO && PLAYER_INFO.listen_port) || (location.port || 80);
+      const url = `${location.protocol}//${host}:${port}/d${full}`;
+      if(pick){
+        const protoUrl=(pick.proto+'://'+url).replace(/"/g,'%22');
+        console.log('[play] 唤起',pick.proto,protoUrl);
+        btn.textContent='▶ 启动中...';
+        const ifr=document.createElement('iframe');
+        ifr.style.display='none';
+        ifr.src=protoUrl;
+        document.body.appendChild(ifr);
+        setTimeout(()=>{try{ifr.remove();}catch(e){}},3000);
+        setTimeout(()=>{btn.textContent='▶ PotPlayer';},2000);
+      } else {
+        navigator.clipboard.writeText(url).then(()=>{
+          btn.textContent='✓ 已复制';
+          setTimeout(()=>{btn.textContent='▶ PotPlayer';},1200);
+        });
+      }
+    }
+    // 事件代理:点击 .play-menu(capture 阶段 + iframe 唤起,绕过 .item 的 stopPropagation)
+    document.addEventListener('click',(e)=>{
+      const btn=e.target.closest('.play-menu');
+      if(btn){e.preventDefault();e.stopPropagation();launchInPotPlayer(btn);}
+    }, true);  // true = capture 阶段,先于目标 inline onclick 触发
 
     function applyFilter() {
       const q = $("search").value.trim().toLowerCase();

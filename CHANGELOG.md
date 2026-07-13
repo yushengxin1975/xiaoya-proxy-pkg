@@ -4,10 +4,18 @@
 
 ## [Unreleased]
 
+### Added
+- **第三方播放器唤起**(PotPlayer / VLC):视频列表项右侧加 `▶ PotPlayer` 按钮,hover 显示,点击通过 `potplayer://` / `vlc://` 协议唤起本地安装的第三方播放器播放
+  - 用 `/d/<path>` URL(代理 302 到 Alist `raw_url` = 阿里云盘直链),PotPlayer 识别为单文件并显示视频名(而不是 m3u8 URL)
+  - 后端新增 `PLAYER_PATHS` 配置(协议|名字|exe 路径,分号分隔) + `GET /__api__/player_info` 端点
+  - 用 iframe 唤起(capture 阶段监听 + 避开 .item 的 stopPropagation),避免主页面 navigation 改变
+  - 配置示例: `PLAYER_PATHS=potplayer|PotPlayer|C:\Program Files\DAUM\PotPlayer\PotPlayer.exe;vlc|VLC|C:\Program Files\VideoLAN\VLC\vlc.exe`
+
 ### Fixed
 - **字幕面板每 ~500ms 重复打印"字幕面板已建"**:小雅页面的 MutationObserver 检测到 video 重建就调用 `buildSubtitlePanel`,但没有去重。每次 MO 触发都重建整个 panel(虽然逻辑正确但 console 噪音大,且 head 内的字号调节按钮会被反复销毁/重建,localStorage 写入也是无意义的)。修复:用 `panel.dataset.trackCount` 记录当前轨道数,如果未变直接 return,跳过重建
 - **外挂字幕 + 视频自带字幕同时显示一行重复字幕**:之前选 sibling 字幕时同时调 `art.subtitle.switch({url, type:'vtt'})`,让 hls.js 也加载同一份 VTT,导致浏览器原生 `<track>` 和 hls.js 内部 track 同时画 → 一行重复。修复:`sibling` 字幕只通过 `<track>.mode='showing'` + 自定义 overlay 渲染,不调 `art.subtitle.switch`
 - **字幕字号无法调节**:之前字幕画在 overlay 里,字号固定 22px。字幕面板 header 加 `A-` / `A+` 按钮,范围 14-44px,localStorage 记住选择(`__proxy_sub_size`),刷新页面也保留
+- **config 文件编码读取失败**:`_read_config` 只支持 UTF-8,但 PowerShell `Add-Content` 经常用 GBK 写文件,导致 ALIST_URL/ALIST_USER 等读到空。修复:优先 GB18030(GBK 超集),失败回退 UTF-8,`errors='replace'`
 
 ## [0.3.20] - 2026-07-13
 

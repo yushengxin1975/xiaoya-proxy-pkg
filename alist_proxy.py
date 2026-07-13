@@ -60,20 +60,32 @@ _CONFIG_FILE = os.path.join(
 
 
 def _read_config(name):
-    """从 ~/.config/xiaoya-proxy/config 读 KEY=VALUE,UTF-8 直读,支持 emoji。
+    """从 ~/.config/xiaoya-proxy/config 读 KEY=VALUE。
+    优先 GB18030(兼容 GBK + UTF-8 中文),PowerShell Add-Content 写出的文件常混 GBK/UTF-8
     找不到返回空串。"""
     try:
-        with open(_CONFIG_FILE, encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                # 匹配 KEY=VALUE 或 KEY="VALUE"(V 里允许 ; | 等)
-                if line.startswith(name + "="):
-                    val = line[len(name) + 1:].strip()
-                    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
-                        val = val[1:-1]
-                    return val
+        # 优先 GB18030(GBK 超集),失败回退 UTF-8
+        data = None
+        for enc in ("gb18030", "utf-8"):
+            try:
+                with open(_CONFIG_FILE, encoding=enc) as f:
+                    data = f.read()
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        if data is None:
+            with open(_CONFIG_FILE, encoding="gb18030", errors="replace") as f:
+                data = f.read()
+        for raw in data.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            # 匹配 KEY=VALUE 或 KEY="VALUE"(V 里允许 ; | 等)
+            if line.startswith(name + "="):
+                val = line[len(name) + 1:].strip()
+                if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+                    val = val[1:-1]
+                return val
     except Exception:
         pass
     return ""
@@ -138,6 +150,13 @@ LISTEN_PORT  = int(_env("LISTEN_PORT", "8080"))
 # 避免和小雅分享库(已挂在根)在 Alist 自身根视图上撞车。
 # 这里只是 UI 层把它们提到代理根目录显示,实际数据仍从挂载点读取。
 EXTRA_ROOT_LINKS = _env("EXTRA_ROOT_LINKS", "")
+# 第三方播放器:用于在 __simple__ 视频列表上生成 "在 X 播放" 按钮。
+# PLAYER_PATHS 格式:分号分隔,每条 "协议|显示名|可执行文件路径(可选)"
+# 例: PLAYER_PATHS="potplayer|PotPlayer|C:\Program Files\DAUM\PotPlayer\PotPlayer.exe;vlc|VLC|D:\vlc\vlc.exe"
+# 协议用于浏览器唤起(potplayer:// / vlc://)系统会查注册表找播放器。
+# 路径非空时按钮还会跳到"已安装路径"备份逻辑(未来扩展)。
+# 留空 = 不显示第三方播放器按钮(只显示"复制 m3u8")。
+PLAYER_PATHS = _env("PLAYER_PATHS", "")
 URL_CACHE_TTL = 14 * 60       # URL 缓存 14 分钟(留 1 分钟缓冲,阿里云盘有效期 15 分钟)
 URL_REFRESH_MARGIN = 60       # 距过期不足 60 秒时认为 URL 即将失效
 MAX_RETRY_ON_403 = 2          # 遇到 403 时最多重试次数
@@ -1960,6 +1979,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self._handle_api_history_list()
             return
 
+        # 第三方播放器列表(用于 "在 X 播放" 按钮)
+        if path == "__api__/player_info":
+            self._handle_api_player_info()
+            return
+
         # 虚拟根目录挂载点
         if path == "__api__/extra_roots":
             self._handle_api_extra_roots()
@@ -3044,6 +3068,51 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 path = path.rstrip("/")
             items.append({"name": name or path, "path": path, "virtual": True})
         self._json(200, {"code": 200, "message": "success", "data": items})
+
+    def _handle_api_player_info(self):
+        """返回已配置的第三方播放器列表(GET /__api__/player_info)。
+        前端在视频列表/小雅注入页用它来生成 "在 X 播放" 按钮。
+        PLAYER_PATHS 格式: "协议|显示名|可执行文件路径(可选)"。
+        """
+        players = []
+        for raw in (PLAYER_PATHS or "").split(";"):
+            raw = raw.strip()
+            if not raw:
+                continue
+            parts = raw.split("|", 2)
+            # 智能解析:4 段时把中间合到名字
+            # 4+ 段通常格式: 协议|名字1|名字2|exe2 → 但这违反"2 段"约定
+            # 正常:3 段(协议|名字|exe),2 段(协议|名字),4+ 视为用户错误,合并
+            all_parts = raw.split("|")
+            if len(all_parts) == 3:
+                parts = all_parts
+            elif len(all_parts) == 2:
+                parts = all_parts + [""]
+            else:
+                # 4+ 段:协议|...中间...|最后一段作 exe
+                proto = all_parts[0]
+                exe = all_parts[-1]
+                name = "|".join(all_parts[1:-1])  # 名字含 |
+                parts = [proto, name, exe]
+            if len(parts) < 2:
+                continue
+            proto = parts[0].strip()
+            name = parts[1].strip()
+            exe = parts[2].strip() if len(parts) >= 3 else ""
+            if not proto or not name:
+                continue
+            # 标记 exe 是否真实存在(前端可据此灰显按钮)
+            exe_exists = bool(exe) and os.path.isfile(exe)
+            players.append({
+                "proto": proto,
+                "name": name,
+                "exe": exe,
+                "exe_exists": exe_exists,
+            })
+        self._json(200, {"code": 200, "message": "success",
+                         "data": {"players": players,
+                                  "listen_host": LISTEN_HOST,
+                                  "listen_port": LISTEN_PORT}})
 
     # ---------- 目录浏览(纯文本,保留兼容) ----------
     def _handle_list(self, rel_path):

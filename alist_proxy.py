@@ -624,6 +624,10 @@ function buildSubtitlePanel(){
     // 已建过就只更新
     let panel=document.getElementById('__proxy_sub_panel');
     const existed=!!panel;
+    // 如果 panel 已建且 track 数量一致,跳过重建(MO 频繁触发会重复建)
+    if(existed && panel.dataset.trackCount===String(tracks.length)){
+      return;
+    }
     // 确保有一个常驻的"字幕"小按钮,点它能开/关 panel
     let toggle=document.getElementById('__proxy_sub_toggle');
     if(!toggle){
@@ -657,12 +661,39 @@ function buildSubtitlePanel(){
       const title=document.createElement('span');
       title.textContent='字幕(代理注入)';
       title.style.cssText='font-weight:600;color:#4fc3f7;';
+      // 字号调节按钮(默认 22px,14-44px)
+      const sizeCtrl=document.createElement('span');
+      sizeCtrl.style.cssText='display:flex;align-items:center;gap:4px;font-size:12px;color:#aaa;';
+      const szMinus=document.createElement('span');
+      szMinus.textContent='A-';szMinus.style.cssText='cursor:pointer;padding:2px 6px;background:#2a3540;border-radius:3px;user-select:none;';
+      const szVal=document.createElement('span');
+      let curSize=22;
+      try{const saved=parseInt(localStorage.getItem('__proxy_sub_size')||'22',10);if(saved>=14&&saved<=44)curSize=saved;}catch(e){}
+      szVal.textContent=curSize+'px';szVal.style.cssText='min-width:32px;text-align:center;color:#4fc3f7;';
+      const szPlus=document.createElement('span');
+      szPlus.textContent='A+';szPlus.style.cssText='cursor:pointer;padding:2px 6px;background:#2a3540;border-radius:3px;user-select:none;';
+      function applySize(n){
+        curSize=Math.max(14,Math.min(44,n));
+        szVal.textContent=curSize+'px';
+        const ov=document.getElementById('__proxy_subtitle_overlay__');
+        if(ov)ov.style.fontSize=curSize+'px';
+        try{localStorage.setItem('__proxy_sub_size',String(curSize));}catch(e){}
+      }
+      szMinus.onclick=()=>applySize(curSize-2);
+      szPlus.onclick=()=>applySize(curSize+2);
+      sizeCtrl.appendChild(szMinus);sizeCtrl.appendChild(szVal);sizeCtrl.appendChild(szPlus);
       const close=document.createElement('span');
       close.textContent='×';
       close.style.cssText='cursor:pointer;color:#888;font-size:18px;line-height:1;padding:0 4px;';
       close.onclick=()=>{panel.style.display='none';toggle.style.display='';};
-      head.appendChild(title);head.appendChild(close);
+      // 右侧 group: 字号 + 关闭
+      const rightGrp=document.createElement('span');
+      rightGrp.style.cssText='display:flex;align-items:center;gap:8px;';
+      rightGrp.appendChild(sizeCtrl);rightGrp.appendChild(close);
+      head.appendChild(title);head.appendChild(rightGrp);
       panel.appendChild(head);
+      // 初始化 overlay 字号
+      applySize(curSize);
       document.body.appendChild(panel);
       // 初始 panel 显示,toggle 隐藏(panel 开着时 toggle 不必重复出现)
       toggle.style.display='none';
@@ -695,6 +726,8 @@ function buildSubtitlePanel(){
     }
     const offBtn=makeItem('关闭字幕',()=>{
       for(const t of v.textTracks)t.mode='hidden';
+      // 关闭:告诉自定义渲染器"不显示任何字幕"
+      window.__proxySelectedSubtitleIdx=-1;
       try{
         const arts=[window.art,(window.AP&&window.AP.instance),document.querySelector('.art-video-player')&&document.querySelector('.art-video-player').__art];
         const art=arts.find(Boolean);
@@ -713,20 +746,23 @@ function buildSubtitlePanel(){
       const btn=makeItem('▶ '+lbl,()=>{
         for(const x of v.textTracks)x.mode='hidden';
         t.mode='showing';
-        // HLS / ArtPlayer 不读 <track>,另调 subtitle.switch 让 hls.js 接管字幕轨
-        try{
-          const arts=[window.art,(window.AP&&window.AP.instance),document.querySelector('.art-video-player')&&document.querySelector('.art-video-player').__art];
-          const art=arts.find(Boolean);
-          if(art){
-            const proxyUrl=t.dataset.proxyUrl;  // sibling 字幕保留原始代理 URL
-            const vttUrl=t.dataset.source==='sibling'?(proxyUrl||t.src):t.src;
-            if(art.subtitle&&typeof art.subtitle.switch==='function'){
-              art.subtitle.switch({url:vttUrl,type:'vtt',name:lbl,lang:lang});
-            }else if(typeof art.addTrack==='function'){
-              art.addTrack({url:vttUrl,type:'SUBTITLES',lang:lang,name:lbl,default:true});
+        // 记录用户选择的字幕(供自定义渲染器只显示这一条)
+        window.__proxySelectedSubtitleIdx=idx;
+        // 只对 video_preview 字幕调 subtitle.switch(sibling 字幕不走 hls.js,避免重复显示)
+        if(t.dataset.source!=='sibling'){
+          try{
+            const arts=[window.art,(window.AP&&window.AP.instance),document.querySelector('.art-video-player')&&document.querySelector('.art-video-player').__art];
+            const art=arts.find(Boolean);
+            if(art){
+              const vttUrl=t.src;
+              if(art.subtitle&&typeof art.subtitle.switch==='function'){
+                art.subtitle.switch({url:vttUrl,type:'vtt',name:lbl,lang:lang});
+              }else if(typeof art.addTrack==='function'){
+                art.addTrack({url:vttUrl,type:'SUBTITLES',lang:lang,name:lbl,default:true});
+              }
             }
-          }
-        }catch(e){console.warn('[proxy-fallback] ArtPlayer.subtitle.switch 失败',e);}
+          }catch(e){console.warn('[proxy-fallback] ArtPlayer.subtitle.switch 失败',e);}
+        }
       });
       btn.dataset.kind='track';
       btn.dataset.idx=idx;
@@ -763,6 +799,7 @@ function buildSubtitlePanel(){
       if(t&&t.addEventListener)t.addEventListener('change',updateActive);
     }
     updateActive();
+    panel.dataset.trackCount=String(trackBtns.length);
     console.log('[proxy-fallback] 字幕面板已建,共',trackBtns.length,'条字幕(之前',existed?'已存在':'新建',')');
   }
   attempt();
@@ -821,9 +858,10 @@ function setupCustomSubtitleRenderer(){
     if(o)return o;
     o=document.createElement('div');
     o.id='__proxy_subtitle_overlay__';
-    // position:fixed 不参与任何父容器布局(进度条 / 控制条位置不受影响)
-    // bottom:18% 抬到进度条上方,留出足够空间;同时 z-index 顶到最高
-    o.style.cssText='position:fixed;left:0;right:0;bottom:18%;z-index:2147483600;pointer-events:none;text-align:center;display:flex;justify-content:center;flex-direction:column;align-items:center;gap:2px;font:600 22px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;text-shadow:0 0 3px rgba(0,0,0,.95),0 0 6px rgba(0,0,0,.85);color:#fff;background:transparent;box-shadow:none;';
+    // 读 localStorage 里的字号(panel 初始化时已读)
+    let initSize=22;
+    try{const s=parseInt(localStorage.getItem('__proxy_sub_size')||'22',10);if(s>=14&&s<=44)initSize=s;}catch(e){}
+    o.style.cssText='position:fixed;left:0;right:0;bottom:18%;z-index:2147483600;pointer-events:none;text-align:center;display:flex;justify-content:center;flex-direction:column;align-items:center;gap:2px;font-weight:600;font-size:'+initSize+'px;line-height:1.4;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;text-shadow:0 0 3px rgba(0,0,0,.95),0 0 6px rgba(0,0,0,.85);color:#fff;background:transparent;box-shadow:none;';
     // 把 overlay 挂到 .art-video-player 上(优先),或 video,或 body
     const host=document.querySelector('.art-video-player')||document.querySelector('.art-subtitle-show')||document.querySelector('video')||document.body;
     if(host&&host!==document.body){
@@ -845,15 +883,17 @@ function setupCustomSubtitleRenderer(){
         }
       }
       const o=ensureOverlay();
-      // 取所有字幕轨的 activeCues
+      // 只渲染用户选中的字幕轨(避免 3 条一起显示)
+      const selIdx=(typeof window.__proxySelectedSubtitleIdx==='number')?window.__proxySelectedSubtitleIdx:-1;
       let html='';
       for(let i=0;i<v.textTracks.length;i++){
         const tt=v.textTracks[i];
         if(tt.kind!=='subtitles')continue;
+        // 如果用户没选过,默认第 0 条;选过的话只显示选中的
+        if(selIdx>=0 && i!==selIdx)continue;
         const cues=tt.activeCues;
         if(!cues)continue;
         for(const c of cues){
-          // 用 textContent 防 XSS,简单保留换行
           const txt=(c.text||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])).replace(/\r?\n/g,'<br/>');
           html+='<span style="background:transparent !important;background-color:transparent !important;background-image:none !important;padding:2px 6px;display:inline-block;">'+txt+'</span>';
         }

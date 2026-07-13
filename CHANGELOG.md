@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- **字幕面板每 ~500ms 重复打印"字幕面板已建"**:小雅页面的 MutationObserver 检测到 video 重建就调用 `buildSubtitlePanel`,但没有去重。每次 MO 触发都重建整个 panel(虽然逻辑正确但 console 噪音大,且 head 内的字号调节按钮会被反复销毁/重建,localStorage 写入也是无意义的)。修复:用 `panel.dataset.trackCount` 记录当前轨道数,如果未变直接 return,跳过重建
+- **外挂字幕 + 视频自带字幕同时显示一行重复字幕**:之前选 sibling 字幕时同时调 `art.subtitle.switch({url, type:'vtt'})`,让 hls.js 也加载同一份 VTT,导致浏览器原生 `<track>` 和 hls.js 内部 track 同时画 → 一行重复。修复:`sibling` 字幕只通过 `<track>.mode='showing'` + 自定义 overlay 渲染,不调 `art.subtitle.switch`
+- **字幕字号无法调节**:之前字幕画在 overlay 里,字号固定 22px。字幕面板 header 加 `A-` / `A+` 按钮,范围 14-44px,localStorage 记住选择(`__proxy_sub_size`),刷新页面也保留
+
 ## [0.3.20] - 2026-07-13
 
 ### Removed

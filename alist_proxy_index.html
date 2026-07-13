@@ -1328,12 +1328,12 @@
     window.addEventListener("load", route);
     $("sort").addEventListener("change", (e) => {
       currentSort = e.target.value;
-      if (allItems.length > 0 && currentView === "browse") renderDir(location.hash.slice(1) || "/", allItems);
+      if (allItems.length > 0 && currentView === "browse") renderDir(decodeURIComponent(location.hash.slice(1)) || "/", allItems);
     });
     $("toggle-type").addEventListener("click", (e) => {
       groupByType = !groupByType;
       e.target.classList.toggle("active", groupByType);
-      if (allItems.length > 0 && currentView === "browse") renderDir(location.hash.slice(1) || "/", allItems);
+      if (allItems.length > 0 && currentView === "browse") renderDir(decodeURIComponent(location.hash.slice(1)) || "/", allItems);
     });
     $("search").addEventListener("keydown", (e) => {
       if (e.key === "Escape") { e.target.value = ""; applyFilter(); }

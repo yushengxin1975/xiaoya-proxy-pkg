@@ -4,46 +4,19 @@
 
 ## [Unreleased]
 
-## [0.3.21] - 2026-07-12
+## [0.3.20] - 2026-07-13
 
-### Added
-- **本地 .ts 段缓存**(防阿里云盘风控):
-  - `LocalSegmentCache`:磁盘 LRU 缓存,默认上限 200GB,目录 `~/.cache/alist_proxy/ts_segments/`
-  - `LocalCacheWorker`:后台 worker 顺序拉取所有段到本地
-  - `_proxy_to(cache_to=)`:新增可选参数,转发上游 .ts 时**边发边缓存**(无需重新拉取)
-  - **阶段 B 降级 m3u8**:video_preview 失败时,若有 manifest,生成多段 m3u8 — 缓存命中走本地,缺失回退上游并自动缓存
-  - **CURRENT_VIDEO 机制**:前端通过 `/__api__/cache/register` 注册正在播放的视频,worker 仅在 CURRENT_VIDEO 匹配时拉取,切走 24 小时没心跳则自动停止
-  - 配置:`LOCAL_CACHE_FULL_PREFETCH` (默认 true)、`LOCAL_CACHE_PREFETCH_INTERVAL` (默认 0.15s)
-
-- **缓存进度可视化面板**(`PROXY_FALLBACK_JS._setupCachePanel`):
-  - 播放器右下角浮动半透明面板,显示 `▓ N / M 段 (X%)` + 渐变进度条
-  - 每 5 秒轮询 `/__api__/cache/stats`,实时反映磁盘累积
-  - `MANIFEST_PARSED` 事件触发 register,带真实 segment 数
-
-- **缓存统计 API**:
-  - `GET /__api__/cache/stats`:返回总段数/总大小/磁盘用量/最近 10 视频命中率
-  - `POST /__api__/cache/register`:前端注册当前播放视频
-  - `POST /__api__/debug/workers`:调试用,返回 worker 状态
+### Removed
+- **本地 .ts 段缓存功能回滚**:0.3.21 引入的 `LocalSegmentCache` + `LocalCacheWorker` 整套移除
+  - 理由:实际使用中产生多种问题(累积缓存路径与转存目录路径不一致、worker 在风控后被 hang、seek 未缓存段 502 卡死、音频变调在长片中依然出现)
+  - 移除:磁盘缓存(200GB LRU)、worker 全量预取、`CURRENT_VIDEO` 跟踪、`/__api__/cache/stats|register|check|debug/workers` 端点、缓存进度面板、阶段 B 多段降级 m3u8、`configureHls` 激进 buffer
+  - 保留:0.3.19 全部修复(本地 hls.min.js、激进预刷新、字幕注入、同目录字幕、播放历史等)
+- **阶段 3 缓存优先播放功能回滚**:fallback 触发时的 `/__api__/cache/check` 查询、`force_cache=1` 跳过 video_preview 逻辑
+  - 理由:与"取消缓存功能"理由相同
 
 ### Fixed
-- **video_preview 失败导致整个视频无法播放**(阿里云盘 500 NotFound.File / 风控):
-  - 阶段 B 多段降级 m3u8 替代单段,缓存段从本地读,缺失段自动回退上游拉取
-  - `_handle_hls_proxy` 改动:`video_preview` 持续失败时,从 `hls_cache.peek()` 取已过期 URL 兜底尝试
-
-- **`.ts` URL 在 video_preview 失败时无法获取**:
-  - `UrlCache.peek()`:返回已存 URL(忽略过期),供 `.ts` handler 兜底旧签名
-
-- **OSS URL `x-oss-process=if_status_eq_404{hls/...}` 含真 `/`,导致段文件名提取错误**:
-  - 修复:`url.split("?", 1)[0].rsplit("/", 1)[-1]`(先剥 query 再剥 path)
-
-- **音频变调**(降级 m3u8 段时长估算不准导致 PTS 漂移):
-  - manifest 现在保存每段真实 EXTINF 时长
-  - `_proxy_m3u8` 解析时记录每段 duration
-  - `build_fallback_m3u8` 用真实时长生成 EXTINF,不再硬编码 60s
-
-- **hls.js 默认不激进预加载导致灰条不超前**:
-  - `configureHls(h)`:统一配置 `maxBufferLength=14400`(4h)、`maxParallelDownloads=12`(默认 6 翻倍)
-  - `maxBufferSize` 突破 60MB 默认上限到 ~1TB
+- **代理页面 (`__simple__/`) 路径显示乱码**(URL 编码而不是中文)
+  - 修复:`renderDir()` 在排序/分组按钮事件里直接传 `location.hash.slice(1)`(URL 编码),改为先 `decodeURIComponent`
 
 ## [0.3.19] - 2026-07-11
 

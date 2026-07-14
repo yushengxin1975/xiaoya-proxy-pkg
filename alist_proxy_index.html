@@ -134,7 +134,7 @@
     .item.video { border-left: 3px solid #4fc3f7; cursor: pointer; }
     .item.video .icon { color: #4fc3f7; }
     .item.video:hover .name { color: #4fc3f7; }
-    /* 视频项右侧"播放"按钮(在卡片里加一个 dropdown 触发器) */
+        /* 视频项右侧"播放"按钮(在卡片里加一个 dropdown 触发器) */
     .item .play-menu {
       position:absolute;right:12px;top:50%;transform:translateY(-50%);
       padding:5px 10px;background:rgba(79,195,247,0.15);color:#4fc3f7;
@@ -144,6 +144,13 @@
     }
     .item:hover .play-menu{opacity:1;}
     .item .play-menu:hover{background:rgba(79,195,247,0.3);}
+    /* 历史页面的播放按钮:始终可见,放置在 right-meta 中(因为没有 absolute parent) */
+    .right-meta .play-menu {
+      position:static;opacity:1;padding:3px 8px;font-size:11px;margin-right:4px;
+      background:rgba(79,195,247,0.18);border:1px solid #2a3540;border-radius:4px;
+      color:#4fc3f7;cursor:pointer;user-select:none;display:inline-block;
+    }
+    .right-meta .play-menu:hover{background:rgba(79,195,247,0.35);}
     .item.dir { border-left: 3px solid #ffa726; }
     .item.dir .icon { color: #ffa726; }
     .item.new {
@@ -1270,6 +1277,10 @@
           html += `<span class="right-meta">`;
           html += `<span class="play-count" title="累计播放次数">▶ ${count}</span>`;
           html += `<span class="last-played" title="${new Date(lastTs).toLocaleString()}">${escapeHtml(lastTxt)}</span>`;
+          // 视频文件加 "▶ PotPlayer" 按钮(只对视频文件,其他文件没意义)
+          if(isVideo(path)){
+            html += `<span class="play-menu" data-full="${escapeHtml(path)}" onclick="event.preventDefault();event.stopPropagation();" title="在 PotPlayer 播放">▶ PotPlayer</span>`;
+          }
           html += `<button class="del-btn" data-del="${escapeHtml(path)}" title="从历史中移除">✕</button>`;
           html += `</span>`;
           html += `</div>`;

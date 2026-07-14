@@ -10,6 +10,7 @@
   - 后端新增 `PLAYER_PATHS` 配置(协议|名字|exe 路径,分号分隔) + `GET /__api__/player_info` 端点
   - 用 iframe 唤起(capture 阶段监听 + 避开 .item 的 stopPropagation),避免主页面 navigation 改变
   - 配置示例: `PLAYER_PATHS=potplayer|PotPlayer|C:\Program Files\DAUM\PotPlayer\PotPlayer.exe;vlc|VLC|C:\Program Files\VideoLAN\VLC\vlc.exe`
+- **历史页面也加 PotPlayer 按钮**:`📜 历史` 视图里每个视频条目右边显示 `▶ PotPlayer` 按钮(非视频文件不显示)。复用 `launchInPotPlayer()` 函数,同样的 iframe + capture 监听机制
 
 ### Fixed
 - **字幕面板每 ~500ms 重复打印"字幕面板已建"**:小雅页面的 MutationObserver 检测到 video 重建就调用 `buildSubtitlePanel`,但没有去重。每次 MO 触发都重建整个 panel(虽然逻辑正确但 console 噪音大,且 head 内的字号调节按钮会被反复销毁/重建,localStorage 写入也是无意义的)。修复:用 `panel.dataset.trackCount` 记录当前轨道数,如果未变直接 return,跳过重建
